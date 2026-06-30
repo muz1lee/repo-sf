@@ -26,10 +26,13 @@ scripts/rsf_video_m7.sh \
   --reference-frame-index 0
 ```
 
-This runs video prep and then tries COLMAP. If COLMAP is not installed it writes
-`video/colmap_status.json` with `status=missing_colmap`. It also runs MoGe on
-the representative frame when the MoGe runtime is available, producing
-`video/moge_reference/reference/pointcloud.ply`.
+This runs video prep, COLMAP camera reconstruction, MoGe dense reference
+geometry, Qwen/SAM foreground removal, and the 3DGS runner. Missing optional
+runtimes are recorded as status JSON files so the earlier artifacts remain
+usable.
+
+Set `RSF_VIDEO_BG_ONLY_SKIP=1` or `RSF_VIDEO_3DGS_SKIP=1` to stop before those
+heavier stages.
 
 ## MoGe Dense Reference Geometry
 
@@ -41,6 +44,34 @@ This is the current dense geometry bridge for the video background branch:
 `video/reference.png` -> dense point map/depth/PLY. It uses
 `/mnt/workspace/wenqian/hawor_runtime/moge_venv/bin/python` and keeps torch/model
 dependencies out of this project's `.venv`.
+
+## BG-only Video Frames
+
+```bash
+scripts/rsf_video_bg_only.sh --run-dir runs/desk_cups_001_m7
+```
+
+This uses Qwen proposals before SAM masks, then writes inpainted foreground-free
+frames to `video/bg_only/frames`, masks to `video/bg_only/masks`, and status to
+`video/bg_only_status.json`.
+
+## 3DGS Background Runner
+
+```bash
+scripts/rsf_video_3dgs.sh --run-dir runs/desk_cups_001_m7 --max-steps 3000
+```
+
+This prepares a Nerfstudio-style dataset from `video/bg_only/frames` and
+`video/colmap/sparse/0`, then runs `ns-train splatfacto` when a 3DGS runtime is
+available. The heavy training environment belongs in `.venv_3dgs`, not the
+project `.venv`. On completion, `video/3dgs_status.json` records the latest
+`config.yml` and checkpoint.
+
+```bash
+scripts/rsf_video_view_3dgs.sh --run-dir runs/desk_cups_001_m7 --websocket-port 7007
+```
+
+This starts Nerfstudio's interactive viewer from the latest trained 3DGS config.
 
 ## Stereo Full Scene
 

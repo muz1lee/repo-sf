@@ -82,6 +82,25 @@ def test_qwen_proposal_client_posts_image_and_parses_json(monkeypatch, tmp_path)
     assert base64.b64decode(encoded)
 
 
+def test_qwen_default_prompt_asks_for_all_tabletop_foreground_objects(monkeypatch, tmp_path):
+    image = tmp_path / "frame.png"
+    Image.new("RGB", (64, 48), color=(1, 2, 3)).save(image)
+    seen = []
+
+    def fake_post(url, *, headers, json, timeout):  # noqa: ANN001
+        seen.append(json["messages"][0]["content"][0]["text"])
+        return DummyResponse({"choices": [{"message": {"content": '{"objects":[{"label":"tissue pack"}]}'}}]})
+
+    monkeypatch.setattr("real2sim_scene_foundry.proposals.requests.post", fake_post)
+
+    QwenProposalClient(base_url="http://qwen.example/v1", api_key="secret").propose(image)
+
+    assert "every visible movable foreground object" in seen[0]
+    assert "tissue packs" in seen[0]
+    assert "cloths" in seen[0]
+    assert "Exclude the table surface" in seen[0]
+
+
 def test_qwen_proposal_client_uses_qwen_proxy_env_and_scales_1000_coordinates(monkeypatch, tmp_path):
     image = tmp_path / "frame.png"
     Image.new("RGB", (200, 100), color=(1, 2, 3)).save(image)

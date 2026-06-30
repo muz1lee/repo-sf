@@ -52,7 +52,7 @@
 - Phase 6：Background 3DGS
   - 单个双目 pair 不足以训练论文里的背景 3DGS；当前输出 proxy background，并在 manifest 中标记 `requires_video_or_multiview`。
   - 当输入是视频/多帧目录时，使用 foreground masks 生成 BG-only video，再接 3DGS runner，输出 splat 路径和 camera trajectory。
-  - 手机 RGB 视频路径先用 `video-prep` 抽帧，再用 COLMAP 估每帧相机位姿，并用 MoGe 对 representative frame 产 dense point map / depth / PLY；下一步需要对每帧做 Qwen/SAM foreground removal 并接 3DGS runner。
+  - 手机 RGB 视频路径先用 `video-prep` 抽帧，再用 COLMAP 估每帧相机位姿，并用 MoGe 对 representative frame 产 dense point map / depth / PLY；随后对每帧做 Qwen/SAM foreground removal，生成 BG-only frame set，并交给 3DGS runner 训练背景 splat。
 - Phase 7：Interactive Sim Scene
   - 生成 `exports/run_interactive_scene.py`，用 `/mnt/workspace/wenqian/knowin-world/.venv/bin/python` 加载 manifest。
   - Genesis loader 必须按 manifest 显式应用 mass/friction，并运行 settle steps；本项目 venv 不直接安装 Genesis。
@@ -99,7 +99,7 @@
 4. **M4 Alignment**：实现 SAM3D mesh 到 object cloud 的尺度和位姿修正，生成 projection/depth QA。已完成 Qwen/SAM3/SAM3D 主线。
 5. **M5 Background branch**：输出 foreground mask、BG-only RGB、BG-only cloud、background manifest。已完成单帧 proxy 分支。
 6. **M6 Interactive preview**：用 `knowin-world` venv 启 Genesis/Isaac loader，加载 manifest/USD，运行 settle 并打开 viewer 或保存交互脚本入口。已完成 launcher、proxy report 和 Genesis no-viewer settle smoke；viewer 窗口模式留给人工打开。
-7. **M7 Video 3DGS background**：已支持视频/多帧输入、COLMAP camera trajectory、MoGe dense reference geometry；还需生成 BG-only video 并接 3DGS runner，输出 splat 资产。
+7. **M7 Video 3DGS background**：已支持视频/多帧输入、COLMAP camera trajectory、MoGe dense reference geometry、Qwen/SAM 前景移除和 BG-only frame set；3DGS runner 已接入，训练依赖独立放在 `.venv_3dgs`，输出 splat 资产和 `3dgs_status.json`。
 8. **M8 Support plane + physics QA**：从背景点云估计支撑平面，修正 z-up world frame，真实 Genesis/Isaac settle 100 steps 并写回 QA。
 
 ## Test Plan

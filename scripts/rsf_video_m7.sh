@@ -77,6 +77,12 @@ fi
 "${prep_cmd[@]}"
 "${ROOT_DIR}/scripts/rsf_video_colmap.sh" --run-dir "$OUT_DIR" --allow-missing
 "${ROOT_DIR}/scripts/rsf_video_moge_background.sh" --run-dir "$OUT_DIR" --allow-missing
+if [[ "${RSF_VIDEO_BG_ONLY_SKIP:-0}" != "1" ]]; then
+  "${ROOT_DIR}/scripts/rsf_video_bg_only.sh" --run-dir "$OUT_DIR" --allow-missing
+fi
+if [[ "${RSF_VIDEO_3DGS_SKIP:-0}" != "1" ]]; then
+  "${ROOT_DIR}/scripts/rsf_video_3dgs.sh" --run-dir "$OUT_DIR" --allow-missing
+fi
 
 cat <<EOF
 
@@ -85,9 +91,11 @@ Run directory: ${OUT_DIR}
 Video manifest: ${OUT_DIR}/video/video_manifest.json
 COLMAP status: ${OUT_DIR}/video/colmap_status.json
 MoGe dense status: ${OUT_DIR}/video/moge_status.json
+BG-only status: ${OUT_DIR}/video/bg_only_status.json
+3DGS status: ${OUT_DIR}/video/3dgs_status.json
 
 Remaining M7 steps after COLMAP is available:
-  1. Use foreground masks to build BG-only frame set.
-  2. Fit per-scene 3DGS from camera poses + dense/depth supervision.
+  1. Review BG-only frame quality and mask coverage.
+  2. Fit/inspect per-scene 3DGS output.
   3. Align 3DGS background with object digital twins.
 EOF

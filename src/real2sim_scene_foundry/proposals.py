@@ -139,7 +139,15 @@ def normalize_object_proposal(data: dict[str, Any], *, image_size: tuple[int, in
 
 def _proposal_prompt(target_labels: Sequence[str] | None) -> str:
     target = ", ".join(target_labels or [])
-    target_text = f"Focus on these target objects if present: {target}." if target else "Find movable tabletop objects."
+    target_text = (
+        f"Focus on these target objects if present: {target}."
+        if target
+        else (
+            "Find every visible movable foreground object on the tabletop, including bottles, cups, "
+            "tissue packs, paper bags, cloths, napkins, boxes, containers, and small loose objects. "
+            "Exclude the table surface, floor, walls, shelves, chairs, and fixed furniture."
+        )
+    )
     return (
         "Return only valid JSON with schema "
         '{"objects":[{"label":str,"bbox_2d":[x0,y0,x1,y1],"point_2d":[x,y],"confidence":float,'
