@@ -99,6 +99,11 @@ def run_smoke_reconstruction(
     crop_out = object_dir / "crop.png"
     bbox_xyxy = _save_crop(rgb, mask, crop_out)
 
+    scene_cloud_path = out / "scene_cloud.ply"
+    scene_point_count = _write_point_cloud_ply(scene_cloud_path, xyz, rgb)
+    object_cloud_path = object_dir / "object_cloud.ply"
+    object_point_count = _write_point_cloud_ply(object_cloud_path, xyz, rgb, mask)
+
     mesh_path = object_dir / "mesh.glb"
     center, extents, valid_ratio = _mesh_from_masked_xyz(xyz, mask, mesh_path)
     T_object_to_camera = np.eye(4, dtype=np.float64)
@@ -112,6 +117,7 @@ def run_smoke_reconstruction(
         "T_object_to_world": T_object_to_world.tolist(),
         "bbox_xyxy": [int(v) for v in bbox_xyxy],
         "extents_m": [float(v) for v in extents],
+        "object_cloud_path": str(object_cloud_path.relative_to(out)),
         "source_backend": "metric_bbox",
     }
     pose_path.write_text(json.dumps(pose, indent=2), encoding="utf-8")
@@ -148,11 +154,15 @@ def run_smoke_reconstruction(
     qa = {
         "object_count": 1,
         "coordinate_frame": "opencv_x_right_y_down_z_forward_meters",
+        "scene_point_cloud": str(scene_cloud_path.relative_to(out)),
+        "scene_point_count": int(scene_point_count),
         "physics_settle": {"status": "not_run_in_smoke", "nan_detected": False},
         "objects": [
             {
                 "object_id": object_id,
                 "label": label,
+                "object_cloud": str(object_cloud_path.relative_to(out)),
+                "object_point_count": int(object_point_count),
                 "mask_iou": 1.0,
                 "center_error_px": 0.0,
                 "depth_residual_m": 0.0,
@@ -193,6 +203,33 @@ def _mesh_from_masked_xyz(xyz: np.ndarray, mask: np.ndarray, out_path: Path) -> 
     mesh.export(out_path)
     valid_ratio = float(np.count_nonzero(valid) / max(1, np.count_nonzero(mask)))
     return center, extents, valid_ratio
+
+
+def _write_point_cloud_ply(path: Path, xyz: np.ndarray, rgb: np.ndarray, mask: np.ndarray | None = None) -> int:
+    valid = np.all(np.isfinite(xyz), axis=2) & (xyz[..., 2] > 0.0)
+    if mask is not None:
+        valid &= mask
+    points = np.asarray(xyz[valid], dtype=np.float64)
+    colors = np.asarray(rgb[valid], dtype=np.uint8)
+
+    lines = [
+        "ply",
+        "format ascii 1.0",
+        f"element vertex {len(points)}",
+        "property float x",
+        "property float y",
+        "property float z",
+        "property uchar red",
+        "property uchar green",
+        "property uchar blue",
+        "end_header",
+    ]
+    for point, color in zip(points, colors, strict=True):
+        x, y, z = (float(v) for v in point)
+        r, g, b = (int(v) for v in color)
+        lines.append(f"{x:.8g} {y:.8g} {z:.8g} {r} {g} {b}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return int(len(points))
 
 
 def _camera_to_world_transform(T_object_to_camera: np.ndarray) -> np.ndarray:
