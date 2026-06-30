@@ -10,6 +10,7 @@ from PIL import Image
 
 from .background import HTTPInpaintClient
 from .camera import CameraIntrinsics
+from .composite_viewer import export_composite_viewer, serve_composite_viewer
 from .defaults import SAM3D_PROCESS_URL, SAM3_SEGMENT_URL
 from .interactive import export_interactive_scene
 from .pipeline import run_extract, run_reconstruct_align, run_smoke_reconstruction
@@ -109,6 +110,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"support_plane status={report['status']} source={report['source_backend']}")
         print(f"wrote {Path(args.run_dir) / 'scene_manifest.json'}")
         return 0
+    if args.command == "composite-viewer":
+        result = export_composite_viewer(args.run_dir)
+        print(f"wrote {result.index_path}")
+        print(f"wrote {result.config_path}")
+        url = f"http://{args.host}:{int(args.port)}{result.url_path}"
+        print(f"open {url}")
+        if args.export_only:
+            return 0
+        serve_composite_viewer(args.run_dir, host=args.host, port=args.port)
+        return 0
     if args.command == "video-prep":
         result = prepare_rgb_video(
             video_path=args.video,
@@ -154,6 +165,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_reconstruct_parser(subparsers, "align")
     _add_interactive_parser(subparsers, "interactive")
     _add_support_plane_parser(subparsers)
+    _add_composite_viewer_parser(subparsers)
     _add_video_prep_parser(subparsers, "video-prep")
     _add_video_scene_parser(subparsers, "video-scene")
     for name in ("export", "render"):
@@ -207,6 +219,14 @@ def _add_support_plane_parser(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser("support-plane")
     parser.add_argument("--run-dir", required=True, type=Path)
     parser.add_argument("--force", action="store_true", help="Recompute and reapply even if support_plane already exists")
+
+
+def _add_composite_viewer_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser("composite-viewer")
+    parser.add_argument("--run-dir", required=True, type=Path)
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=7010)
+    parser.add_argument("--export-only", action="store_true")
 
 
 def _add_video_prep_parser(subparsers: argparse._SubParsersAction, name: str) -> None:
