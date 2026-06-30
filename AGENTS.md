@@ -5,9 +5,10 @@
 ## 项目定位
 
 - 工作线：**项目落地先行、论文后置**。
-- 目标：复现 SimFoundry 风格的最小 real-to-sim 闭环，先把真实画面生成可渲染、可物理检查的 3D 场景跑通。
-- V1 只做最小可跑 digital twin：输入真实 RGB 图片/视频或双目图片，输出物体 mask、crop、mesh、metric pose/scale、scene manifest、USD/GLB 资产、Genesis/Isaac 可加载预览和 QA overlay。
-- V1 不做论文完整范围：不做 policy training、不做 object/scene/task cousins、不做完整 articulated object pipeline、不做 automatic 3DGS background。
+- 目标：复现 SimFoundry 图示里的 real-to-sim 主流程：Physical Scene Extraction -> Foreground Removal / Object RGB-D Masks -> Mesh + Property Generation -> Background Reconstruction -> Automatic Alignment -> Sim Scene Generation。
+- 当前主线输入优先支持双目图片；完整背景 3DGS 需要 BG-only 视频或多帧输入，单个双目 pair 只能生成 inpainted background + metric background point cloud + proxy scene。
+- 不把服务 smoke 当验收点。验收必须看完整产物：object mesh/pose、background artifacts、scene manifest、USD/GLB、Genesis/Isaac 交互入口、QA overlay/report。
+- 论文里的 object/scene/task cousins、policy training 和完整 articulated object pipeline 是后续扩展，不是当前图示复现的第一验收线。
 
 ## 代码与路径边界
 
@@ -52,6 +53,7 @@ python -m pip install -e '.[dev]'
 | MoGe focal | `http://101.132.143.105:5014/api/focal` | 单目 RGB 的 focal / K 估计 | local health path: `http://localhost:5014/healthz` |
 | HaWoR | `http://101.132.143.105:5012/api/recon` | 手部重建参考，不属于本项目 V1 主线 | local health path: `http://localhost:5012/healthz` |
 | S2M2 stereo depth | `http://10.10.4.244:5060-5067/api/process` | 双目 metric XYZ map | 只在服务器侧可达；本地 Mac 不通 |
+| scene-edit inpaint | `http://101.132.143.105:5091/inpaint` / `:5092/inpaint` | foreground removal / BG-only RGB | 可用时走 HTTP；不可用时本项目用 OpenCV inpaint fallback |
 | SAM3D weights | `/mnt/workspace/SAM3D/object/checkpoints` | 服务端模型资产 | 不要移动 |
 | knowin-world render env | `/mnt/workspace/wenqian/knowin-world/.venv/bin/python` | Genesis/USD 渲染 | 不作为本项目依赖环境 |
 | scene edit smoke data | `/mnt/workspace/wenqian/scene_edit_v0/test_data` | V1 双目 smoke 输入 | 可只读复用 |
@@ -59,7 +61,7 @@ python -m pip install -e '.[dev]'
 ## 工程纪律
 
 - 开始修改前先检查目标项目状态：`git status --short`。如果不是本项目目录，先确认是否误进旧仓库。
-- 默认最小实现：只写 V1 闭环需要的代码，不提前做 cousins、policy、完整 3DGS 或 GUI。
+- 默认最小实现：只写当前 SimFoundry 图示复现需要的代码；背景 3DGS、交互 viewer、物理 settle 都要可插拔、可替换，不提前做 cousins 或 policy。
 - 生产代码采用 TDD：先写失败测试，再写最小实现，再跑测试。文档和纯配置变更可不走 TDD，但要做基本校验。
 - 生成文件不进 Git：`runs/`、`outputs/`、`cache/`、模型权重、视频、渲染图、`.npy`、`.ply`、`.glb` 大产物默认忽略。
 - 不覆盖用户已有改动；不要在旧仓库里 `git reset --hard`、`git checkout --` 或批量删除。
@@ -85,6 +87,8 @@ python -m pip install -e '.[dev]'
   - `needs_manual_refine`
 - SAM3D 输出不能直接当 metric scene truth；必须经过相机系转换和 metric point cloud / mask 对齐检查。
 - QA 必须至少输出 render-vs-input overlay、投影误差或 mask IoU、depth residual、physics settle 状态。
+- Extraction 必须输出背景分支 artifacts：`background/foreground_mask.png`、`background/bg_only.png`、`background/bg_only_cloud.ply`、`background/background_manifest.json`。
+- 可交互场景必须通过 manifest 加载物体 mesh 和显式物理参数；不要只依赖 USD PhysicsMaterial，因为 Genesis 当前不会自动读取接触摩擦。
 
 ## 默认验证命令
 

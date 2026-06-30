@@ -109,9 +109,13 @@ def test_run_reconstruct_align_writes_sam3d_raw_mesh_aligned_mesh_and_metrics(tm
     assert pose["alignment"]["scale"] > 0
     assert pose["alignment"]["depth_residual_m"] >= 0
     assert pose["alignment"]["center_error_px"] >= 0
+    local_mesh = trimesh.load(obj_dir / "mesh_aligned.glb", force="mesh")
+    assert np.linalg.norm(local_mesh.bounds.mean(axis=0)) < 1e-6
+    assert pose["T_object_to_camera"][2][3] > 0.0
     manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
     assert manifest["objects"][0]["mesh_path"] == "objects/red_cup/mesh_aligned.glb"
     assert manifest["objects"][0]["source_backend"] == "sam3d_aligned"
+    assert manifest["background"]["bg_only_image_path"] == "background/bg_only.png"
     qa = json.loads(result.qa_report_path.read_text(encoding="utf-8"))
     assert qa["objects"][0]["alignment_backend"] == "sam3d_bbox_similarity"
     assert qa["objects"][0]["source_backend"] == "sam3d_aligned"

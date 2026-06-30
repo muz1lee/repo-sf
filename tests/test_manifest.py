@@ -1,6 +1,6 @@
 import pytest
 
-from real2sim_scene_foundry.manifest import SceneManifest, SceneObject
+from real2sim_scene_foundry.manifest import SceneBackground, SceneManifest, SceneObject
 
 
 def test_manifest_rejects_negative_mass():
@@ -42,3 +42,18 @@ def test_manifest_serializes_coordinate_conventions():
     assert data["coordinate_frames"]["camera"] == "opencv_x_right_y_down_z_forward_meters"
     assert data["coordinate_frames"]["world"] == "z_up_ground_plane_meters"
     assert data["objects"][0]["source_backend"] == "unknown"
+
+
+def test_manifest_serializes_background_branch():
+    background = SceneBackground(
+        source_backend="opencv_inpaint_single_frame",
+        bg_only_image_path="background/bg_only.png",
+        foreground_mask_path="background/foreground_mask.png",
+        point_cloud_path="background/bg_only_cloud.ply",
+        status="proxy_from_single_stereo_pair",
+    )
+
+    data = SceneManifest(objects=[], background=background).to_dict()
+
+    assert data["background"]["source_backend"] == "opencv_inpaint_single_frame"
+    assert data["background"]["bg_only_image_path"] == "background/bg_only.png"

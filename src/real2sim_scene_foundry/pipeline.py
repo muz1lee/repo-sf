@@ -15,10 +15,11 @@ from scipy.spatial import cKDTree
 import trimesh
 from PIL import Image, ImageDraw
 
+from .background import ArrayInpaintClient, create_background_artifacts
 from .camera import CameraIntrinsics
 from .clients import S2M2Client, SAM3Client, SAM3DClient
 from .defaults import S2M2_URLS, SAM3_SEGMENT_URL, SAM3D_PROCESS_URL
-from .manifest import SceneManifest, SceneObject
+from .manifest import SceneBackground, SceneManifest, SceneObject
 from .proposals import ObjectProposal
 
 
@@ -101,6 +102,7 @@ def run_extract(
     proposals: list[ObjectProposal],
     depth_client: DepthClient | None = None,
     sam3_client: MaskClient | None = None,
+    background_inpaint_client: ArrayInpaintClient | None = None,
     mock_depth_m: float | None = None,
 ) -> ExtractResult:
     if not proposals:
@@ -197,6 +199,7 @@ def run_extract(
     }
     manifest_path = out / "extraction_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    create_background_artifacts(out, inpaint_client=background_inpaint_client)
     return ExtractResult(out_dir=out, manifest_path=manifest_path, object_dirs=object_dirs)
 
 
@@ -312,7 +315,7 @@ def run_reconstruct_align(
             }
         )
 
-    scene_manifest = SceneManifest(objects=scene_objects)
+    scene_manifest = SceneManifest(objects=scene_objects, background=_load_scene_background(out))
     manifest_path = out / "scene_manifest.json"
     manifest_path.write_text(json.dumps(scene_manifest.to_dict(), indent=2), encoding="utf-8")
     usd_path = export_dir / "scene.usda"
@@ -325,6 +328,7 @@ def run_reconstruct_align(
                 "coordinate_frame": "opencv_x_right_y_down_z_forward_meters",
                 "scene_point_cloud": extraction["scene_point_cloud"],
                 "scene_point_count": int(extraction["scene_point_count"]),
+                "background": extraction.get("background"),
                 "physics_settle": {"status": "not_run_before_m5", "nan_detected": False},
                 "objects": qa_objects,
             },
@@ -604,25 +608,34 @@ def _align_mesh_to_object_cloud(
     scale = float(np.median(target_extents / src_extents))
     translation = target_center - scale * src_center
 
-    transform = np.eye(4, dtype=np.float64)
-    transform[:3, :3] *= scale
-    transform[:3, 3] = translation
-    aligned = mesh.copy()
-    aligned.apply_transform(transform)
-    aligned.export(out_path)
+    raw_to_camera = np.eye(4, dtype=np.float64)
+    raw_to_camera[:3, :3] *= scale
+    raw_to_camera[:3, 3] = translation
 
-    aligned_vertices = np.asarray(aligned.vertices, dtype=np.float64)
-    projected_bbox = _projected_bbox(camera, aligned_vertices)
+    local_transform = np.eye(4, dtype=np.float64)
+    local_transform[:3, :3] *= scale
+    local_transform[:3, 3] = -scale * src_center
+    local_mesh = mesh.copy()
+    local_mesh.apply_transform(local_transform)
+    local_mesh.export(out_path)
+
+    T_model_to_camera = np.eye(4, dtype=np.float64)
+    T_model_to_camera[:3, 3] = target_center
+    local_vertices = np.asarray(local_mesh.vertices, dtype=np.float64)
+    camera_vertices = local_vertices + target_center[None, :]
+    projected_bbox = _projected_bbox(camera, camera_vertices)
     target_bbox = _mask_bbox(mask)
     bbox_iou = _bbox_iou(projected_bbox, target_bbox)
     center_error = _bbox_center_error(projected_bbox, target_bbox)
-    depth_residual = _nearest_depth_residual(aligned_vertices, object_points)
+    depth_residual = _nearest_depth_residual(camera_vertices, object_points)
     return {
         "backend": "sam3d_bbox_similarity",
         "scale": float(scale),
         "scale_m": float(np.max(target_extents)),
         "translation": [float(v) for v in translation],
-        "T_model_to_camera": transform.tolist(),
+        "raw_to_camera_transform": raw_to_camera.tolist(),
+        "local_mesh_centered": True,
+        "T_model_to_camera": T_model_to_camera.tolist(),
         "target_bbox_xyxy": [int(v) for v in target_bbox],
         "projected_bbox_xyxy": [int(v) for v in projected_bbox],
         "bbox_iou": float(bbox_iou),
@@ -753,6 +766,21 @@ def _write_usda_stub(path: Path, manifest: SceneManifest) -> None:
         )
     lines.append("}")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _load_scene_background(run_dir: Path) -> SceneBackground | None:
+    path = run_dir / "background" / "background_manifest.json"
+    if not path.exists():
+        return None
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return SceneBackground(
+        source_backend=str(data["source_backend"]),
+        bg_only_image_path=str(data["bg_only_image"]),
+        foreground_mask_path=str(data["foreground_mask"]),
+        point_cloud_path=str(data["bg_only_cloud"]),
+        status="proxy_from_single_stereo_pair",
+        gaussian_splat_path=None,
+    )
 
 
 def _write_overlay(rgb: np.ndarray, mask: np.ndarray, bbox_xyxy: tuple[int, int, int, int], out_path: Path) -> None:

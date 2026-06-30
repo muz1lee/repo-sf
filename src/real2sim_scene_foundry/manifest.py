@@ -47,11 +47,39 @@ class SceneObject:
 
 
 @dataclass(frozen=True)
+class SceneBackground:
+    source_backend: str
+    bg_only_image_path: str
+    foreground_mask_path: str
+    point_cloud_path: str
+    status: str
+    gaussian_splat_path: str | None = None
+
+    def validate(self) -> None:
+        if not self.source_backend:
+            raise ValueError("background source_backend is required")
+        if not self.bg_only_image_path:
+            raise ValueError("background bg_only_image_path is required")
+        if not self.foreground_mask_path:
+            raise ValueError("background foreground_mask_path is required")
+        if not self.point_cloud_path:
+            raise ValueError("background point_cloud_path is required")
+        if not self.status:
+            raise ValueError("background status is required")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class SceneManifest:
     objects: list[SceneObject]
+    background: SceneBackground | None = None
     version: int = 1
 
     def validate(self) -> None:
+        if self.background is not None:
+            self.background.validate()
         seen: set[str] = set()
         for obj in self.objects:
             obj.validate()
@@ -61,7 +89,7 @@ class SceneManifest:
 
     def to_dict(self) -> dict[str, Any]:
         self.validate()
-        return {
+        data = {
             "version": int(self.version),
             "coordinate_frames": {
                 "camera": CAMERA_FRAME,
@@ -69,6 +97,9 @@ class SceneManifest:
             },
             "objects": [obj.to_dict() for obj in self.objects],
         }
+        if self.background is not None:
+            data["background"] = self.background.to_dict()
+        return data
 
 
 def _validate_transform(value: list[list[float]], context: str) -> None:

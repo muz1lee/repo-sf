@@ -147,3 +147,102 @@ def test_cli_extract_uses_qwen_proposal_before_sam_when_no_manual_proposal(tmp_p
     assert calls[1] == ("propose", left, ["red cup"])
     manifest = json.loads((out / "extraction_manifest.json").read_text(encoding="utf-8"))
     assert manifest["objects"][0]["proposal_source"] == "qwen"
+
+
+def test_cli_interactive_writes_scene_launcher(tmp_path):
+    import trimesh
+
+    run = tmp_path / "run"
+    mesh = run / "objects" / "cup" / "mesh_aligned.glb"
+    mesh.parent.mkdir(parents=True)
+    trimesh.creation.box(extents=(0.1, 0.1, 0.1)).export(mesh)
+    (run / "scene_manifest.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "coordinate_frames": {
+                    "camera": "opencv_x_right_y_down_z_forward_meters",
+                    "world": "z_up_ground_plane_meters",
+                },
+                "objects": [
+                    {
+                        "object_id": "cup",
+                        "label": "cup",
+                        "mesh_path": "objects/cup/mesh_aligned.glb",
+                        "mask_path": "objects/cup/mask.png",
+                        "crop_path": "objects/cup/crop.png",
+                        "T_object_to_camera": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 1], [0, 0, 0, 1]],
+                        "T_object_to_world": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 1], [0, 0, 0, 1]],
+                        "scale_m": 0.1,
+                        "mass_kg": 0.2,
+                        "friction": 0.8,
+                        "confidence": 0.9,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    code = main(["interactive", "--run-dir", str(run), "--settle-steps", "10"])
+
+    assert code == 0
+    assert (run / "exports" / "run_interactive_scene.py").is_file()
+    report = json.loads((run / "qa" / "interaction_report.json").read_text(encoding="utf-8"))
+    assert report["physics_settle"]["status"] == "proxy_checked"
+
+
+def test_cli_extract_passes_http_inpaint_client(tmp_path, monkeypatch):
+    left = tmp_path / "left.png"
+    right = tmp_path / "right.png"
+    objects = tmp_path / "objects.yaml"
+    calib = tmp_path / "calib.json"
+    out = tmp_path / "extract"
+    Image.new("RGB", (6, 5), color=(10, 20, 30)).save(left)
+    Image.new("RGB", (6, 5), color=(11, 21, 31)).save(right)
+    objects.write_text(
+        """
+objects:
+  - label: red cup
+    object_id: red_cup
+    bbox_xyxy: [1, 1, 4, 4]
+""",
+        encoding="utf-8",
+    )
+    calib.write_text(
+        json.dumps({"width": 6, "height": 5, "fx": 40.0, "fy": 40.0, "cx": 2.5, "cy": 2.0, "baseline": 0.08}),
+        encoding="utf-8",
+    )
+    seen = []
+
+    class FakeHTTPInpaintClient:
+        def __init__(self, url):
+            self.url = url
+
+    def fake_run_extract(**kwargs):
+        seen.append(kwargs["background_inpaint_client"].url)
+        return type("Result", (), {"manifest_path": out / "extraction_manifest.json"})()
+
+    monkeypatch.setattr("real2sim_scene_foundry.cli.HTTPInpaintClient", FakeHTTPInpaintClient)
+    monkeypatch.setattr("real2sim_scene_foundry.cli.run_extract", fake_run_extract)
+
+    code = main(
+        [
+            "extract",
+            "--left",
+            str(left),
+            "--right",
+            str(right),
+            "--calib",
+            str(calib),
+            "--objects-yaml",
+            str(objects),
+            "--inpaint-url",
+            "http://inpaint/inpaint",
+            "--out",
+            str(out),
+        ]
+    )
+
+    assert code == 0
+    assert seen == ["http://inpaint/inpaint"]
