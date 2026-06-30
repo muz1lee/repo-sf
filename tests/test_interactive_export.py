@@ -60,6 +60,8 @@ def test_export_interactive_scene_writes_genesis_launcher_and_proxy_settle(tmp_p
     assert "set_mass" in script
     assert "genesis_settle_report.json" in script
     assert "qa_report.json" in script
+    assert "--backend" in script
+    assert "gs.cpu" in script
     report = json.loads(result.report_path.read_text(encoding="utf-8"))
     assert report["physics_settle"]["status"] == "proxy_checked"
     assert report["physics_settle"]["settle_steps"] == 25

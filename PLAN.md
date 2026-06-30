@@ -100,7 +100,8 @@
 5. **M5 Background branch**：输出 foreground mask、BG-only RGB、BG-only cloud、background manifest。已完成单帧 proxy 分支。
 6. **M6 Interactive preview**：用 `knowin-world` venv 启 Genesis/Isaac loader，加载 manifest/USD，运行 settle 并打开 viewer 或保存交互脚本入口。已完成 launcher、proxy report 和 Genesis no-viewer settle smoke；viewer 窗口模式留给人工打开。
 7. **M7 Video 3DGS background**：已支持视频/多帧输入、COLMAP camera trajectory、MoGe dense reference geometry、Qwen/SAM 前景移除和 BG-only frame set；3DGS runner 已接入，训练依赖独立放在 `.venv_3dgs`，输出 splat 资产和 `3dgs_status.json`。
-8. **M8 Support plane + physics QA**：从背景点云估计支撑平面，修正 z-up world frame，真实 Genesis/Isaac settle 100 steps 并写回 QA。
+8. **M8 Video object scene composition**：用 MoGe reference frame + `points.exr` 作为 metric RGB-D 输入，复用 Qwen/SAM3/SAM3D/alignment 生成前景 object digital twins，并把 video 3DGS 背景引用写入同一个 `scene_manifest.json`。
+9. **M9 Support plane + physics QA**：从背景点云估计支撑平面，修正 z-up world frame，真实 Genesis/Isaac settle 100 steps 并写回 QA。
 
 ## Test Plan
 - Unit tests：

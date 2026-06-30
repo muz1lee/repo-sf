@@ -66,6 +66,8 @@ def test_genesis_settle_script_uses_knowin_world_python():
     assert "/mnt/workspace/wenqian/knowin-world/.venv/bin/python" in script
     assert "run_interactive_scene.py" in script
     assert "real2sim_scene_foundry.cli" in script
+    assert "--backend" in script
+    assert 'GENESIS_BACKEND="${GENESIS_BACKEND:-cpu}"' in script
 
 
 def test_video_colmap_script_writes_missing_colmap_status(tmp_path):
@@ -328,3 +330,12 @@ def test_video_m7_script_runs_moge_background_step():
     assert "bg_only_status.json" in script
     assert "rsf_video_3dgs.sh" in script
     assert "3dgs_status.json" in script
+
+
+def test_video_scene_script_runs_cli_and_genesis_settle():
+    script = (PROJECT_ROOT / "scripts" / "rsf_video_scene.sh").read_text(encoding="utf-8")
+
+    assert ".qwen_env.local" in script
+    assert "real2sim_scene_foundry.cli video-scene" in script
+    assert "--max-objects" in script
+    assert "rsf_genesis_settle.sh" in script

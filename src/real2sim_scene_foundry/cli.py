@@ -15,6 +15,7 @@ from .interactive import export_interactive_scene
 from .pipeline import run_extract, run_reconstruct_align, run_smoke_reconstruction
 from .proposals import ObjectProposal, QwenProposalClient, load_object_proposals
 from .video import prepare_rgb_video
+from .video_scene import run_video_reference_scene
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -113,6 +114,26 @@ def main(argv: list[str] | None = None) -> int:
         print(f"wrote {result.manifest_path}")
         print(f"wrote {result.reference_path}")
         return 0
+    if args.command == "video-scene":
+        result = run_video_reference_scene(
+            run_dir=args.run_dir,
+            target_labels=args.target_label,
+            max_objects=args.max_objects,
+            proposal_client=QwenProposalClient(
+                base_url=args.qwen_base_url,
+                api_key=args.qwen_api_key,
+                model=args.qwen_model,
+            ),
+            sam3_client=_sam3_client_from_args(args),
+            sam3d_client=_sam3d_client_from_args(args),
+            settle_steps=args.settle_steps,
+        )
+        print(f"wrote {result.manifest_path}")
+        print(f"wrote {result.usd_path}")
+        print(f"wrote {result.qa_report_path}")
+        print(f"wrote {result.interactive_script_path}")
+        print(f"wrote {result.interaction_report_path}")
+        return 0
     parser.error(f"{args.command} is scaffolded but not implemented in V1")
     return 2
 
@@ -127,6 +148,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_reconstruct_parser(subparsers, "align")
     _add_interactive_parser(subparsers, "interactive")
     _add_video_prep_parser(subparsers, "video-prep")
+    _add_video_scene_parser(subparsers, "video-scene")
     for name in ("export", "render"):
         subparsers.add_parser(name)
     return parser
@@ -181,6 +203,19 @@ def _add_video_prep_parser(subparsers: argparse._SubParsersAction, name: str) ->
     parser.add_argument("--frame-stride", type=int, default=10)
     parser.add_argument("--max-frames", type=int, default=None)
     parser.add_argument("--reference-frame-index", type=int, default=0)
+
+
+def _add_video_scene_parser(subparsers: argparse._SubParsersAction, name: str) -> None:
+    parser = subparsers.add_parser(name)
+    parser.add_argument("--run-dir", required=True, type=Path)
+    parser.add_argument("--target-label", action="append", default=None)
+    parser.add_argument("--max-objects", type=int, default=None)
+    parser.add_argument("--settle-steps", type=int, default=100)
+    parser.add_argument("--sam3-url", default=SAM3_SEGMENT_URL)
+    parser.add_argument("--sam3d-url", default=SAM3D_PROCESS_URL)
+    parser.add_argument("--qwen-base-url", default=None)
+    parser.add_argument("--qwen-api-key", default=None)
+    parser.add_argument("--qwen-model", default=None)
 
 
 def _add_stereo_args(parser: argparse.ArgumentParser) -> None:

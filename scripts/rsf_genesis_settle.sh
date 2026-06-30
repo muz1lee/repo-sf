@@ -4,11 +4,13 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RSF_PYTHON="${RSF_PYTHON:-${ROOT_DIR}/.venv/bin/python}"
 KNOWIN_WORLD_PYTHON="${KNOWIN_WORLD_PYTHON:-/mnt/workspace/wenqian/knowin-world/.venv/bin/python}"
+GENESIS_BACKEND="${GENESIS_BACKEND:-cpu}"
 
 usage() {
   cat <<'EOF'
 Usage:
-  scripts/rsf_genesis_settle.sh --run-dir RUN_DIR [--settle-steps N] [--viewer]
+  scripts/rsf_genesis_settle.sh --run-dir RUN_DIR [--settle-steps N]
+                                [--backend cpu|gpu] [--viewer]
 
 Generates the Genesis launcher for a reconstructed scene and runs it with the
 knowin-world virtual environment. Default mode is no-viewer for server smoke.
@@ -32,6 +34,10 @@ while [[ $# -gt 0 ]]; do
     --viewer)
       VIEWER="1"
       shift
+      ;;
+    --backend)
+      GENESIS_BACKEND="$2"
+      shift 2
       ;;
     -h|--help)
       usage
@@ -70,6 +76,7 @@ cmd=(
   "${RUN_DIR}/exports/run_interactive_scene.py"
   --run-dir "$RUN_DIR"
   --settle-steps "$SETTLE_STEPS"
+  --backend "$GENESIS_BACKEND"
 )
 if [[ "$VIEWER" != "1" ]]; then
   cmd+=(--no-viewer)

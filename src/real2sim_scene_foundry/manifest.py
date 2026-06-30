@@ -54,6 +54,8 @@ class SceneBackground:
     point_cloud_path: str
     status: str
     gaussian_splat_path: str | None = None
+    gaussian_splat_config_path: str | None = None
+    gaussian_splat_checkpoint_path: str | None = None
 
     def validate(self) -> None:
         if not self.source_backend:

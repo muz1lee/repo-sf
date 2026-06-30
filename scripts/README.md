@@ -73,6 +73,24 @@ scripts/rsf_video_view_3dgs.sh --run-dir runs/desk_cups_001_m7 --websocket-port 
 
 This starts Nerfstudio's interactive viewer from the latest trained 3DGS config.
 
+## Video Object Scene + 3DGS Background
+
+```bash
+scripts/rsf_video_scene.sh \
+  --run-dir runs/desk_cups_001_m7 \
+  --target-label cup \
+  --target-label bottle \
+  --max-objects 4 \
+  --settle-steps 5
+```
+
+This uses the MoGe reference frame and `points.exr` as metric RGB-D input,
+builds foreground object meshes through Qwen/SAM3/SAM3D/alignment, attaches the
+trained video 3DGS background to `scene_manifest.json`, exports the Genesis
+launcher, and optionally runs no-viewer Genesis settle. The Genesis launcher
+currently loads physics objects and a plane; the 3DGS background is inspected in
+Nerfstudio via `rsf_video_view_3dgs.sh`.
+
 ## Stereo Full Scene
 
 ```bash

@@ -277,3 +277,48 @@ def test_cli_video_prep_writes_manifest(tmp_path):
     assert code == 0
     manifest = json.loads((out / "video" / "video_manifest.json").read_text(encoding="utf-8"))
     assert manifest["sampled_frame_count"] == 3
+
+
+def test_cli_video_scene_runs_reference_scene_builder(tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    seen = []
+
+    def fake_run_video_reference_scene(**kwargs):
+        seen.append(kwargs)
+        return type(
+            "Result",
+            (),
+            {
+                "manifest_path": run / "scene_manifest.json",
+                "usd_path": run / "exports" / "scene.usda",
+                "qa_report_path": run / "qa" / "qa_report.json",
+                "interactive_script_path": run / "exports" / "run_interactive_scene.py",
+                "interaction_report_path": run / "qa" / "interaction_report.json",
+            },
+        )()
+
+    monkeypatch.setattr("real2sim_scene_foundry.cli.run_video_reference_scene", fake_run_video_reference_scene)
+
+    code = main(
+        [
+            "video-scene",
+            "--run-dir",
+            str(run),
+            "--target-label",
+            "cup",
+            "--max-objects",
+            "2",
+            "--settle-steps",
+            "5",
+            "--qwen-base-url",
+            "http://qwen.example/v1",
+            "--qwen-api-key",
+            "secret",
+        ]
+    )
+
+    assert code == 0
+    assert seen[0]["run_dir"] == run
+    assert seen[0]["target_labels"] == ["cup"]
+    assert seen[0]["max_objects"] == 2
+    assert seen[0]["settle_steps"] == 5

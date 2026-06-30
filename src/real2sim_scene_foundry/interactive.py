@@ -33,8 +33,9 @@ def export_interactive_scene(run_dir: str | Path, *, settle_steps: int = 100) ->
         "interactive_script": str(script_path.relative_to(run)),
         "run_command": (
             "/mnt/workspace/wenqian/knowin-world/.venv/bin/python "
-            f"{script_path} --run-dir {run} --settle-steps {int(settle_steps)}"
+            f"{script_path} --run-dir {run} --settle-steps {int(settle_steps)} --backend cpu"
         ),
+        "background": _background_report(manifest.get("background")),
         "physics_settle": {
             "status": "proxy_checked",
             "settle_steps": int(settle_steps),
@@ -47,6 +48,21 @@ def export_interactive_scene(run_dir: str | Path, *, settle_steps: int = 100) ->
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     _merge_qa_physics_settle(run, report["physics_settle"])
     return InteractiveExportResult(script_path=script_path, report_path=report_path)
+
+
+def _background_report(background: dict[str, object] | None) -> dict[str, object]:
+    if not background:
+        return {"status": "absent"}
+    report = {
+        "status": background.get("status", "unknown"),
+        "source_backend": background.get("source_backend", "unknown"),
+        "gaussian_splat_path": background.get("gaussian_splat_path"),
+        "gaussian_splat_config_path": background.get("gaussian_splat_config_path"),
+        "gaussian_splat_checkpoint_path": background.get("gaussian_splat_checkpoint_path"),
+    }
+    if background.get("source_backend") == "video_3dgs_splatfacto":
+        report["note"] = "3DGS background is available in Nerfstudio; Genesis launcher currently loads physics objects and plane only."
+    return report
 
 
 def _proxy_check_object(run_dir: Path, item: dict[str, object]) -> dict[str, object]:
@@ -117,10 +133,11 @@ def main() -> int:
     parser.add_argument("--run-dir", required=True, type=Path)
     parser.add_argument("--settle-steps", type=int, default=100)
     parser.add_argument("--no-viewer", action="store_true")
+    parser.add_argument("--backend", choices=("cpu", "gpu"), default="gpu")
     args = parser.parse_args()
     manifest = json.loads((args.run_dir / "scene_manifest.json").read_text(encoding="utf-8"))
 
-    gs.init(backend=gs.gpu)
+    gs.init(backend=gs.cpu if args.backend == "cpu" else gs.gpu)
     scene = gs.Scene(
         show_viewer=not args.no_viewer,
         sim_options=gs.options.SimOptions(dt=0.01, substeps=4),
