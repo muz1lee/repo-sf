@@ -16,6 +16,19 @@ scripts/rsf_video_prep.sh \
 This prepares sampled frames and `video/video_manifest.json`. It does not train
 3DGS yet; camera poses and BG-only frame generation are the next M7 steps.
 
+## M7 Video Front End
+
+```bash
+scripts/rsf_video_m7.sh \
+  --video /mnt/workspace/wenqian/real2sim_scene_foundry/inputs/videos/desk_cups_001.mp4 \
+  --out runs/desk_cups_001_m7 \
+  --frame-stride 10 \
+  --reference-frame-index 0
+```
+
+This runs video prep and then tries COLMAP. If COLMAP is not installed it writes
+`video/colmap_status.json` with `status=missing_colmap`.
+
 ## Stereo Full Scene
 
 ```bash

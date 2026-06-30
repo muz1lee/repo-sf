@@ -66,3 +66,58 @@ def test_genesis_settle_script_uses_knowin_world_python():
     assert "/mnt/workspace/wenqian/knowin-world/.venv/bin/python" in script
     assert "run_interactive_scene.py" in script
     assert "real2sim_scene_foundry.cli" in script
+
+
+def test_video_colmap_script_writes_missing_colmap_status(tmp_path):
+    run = tmp_path / "run"
+    frames = run / "video" / "frames"
+    frames.mkdir(parents=True)
+    cv2.imwrite(str(frames / "frame_000000.png"), np.zeros((4, 6, 3), dtype=np.uint8))
+
+    subprocess.run(
+        [
+            "bash",
+            str(PROJECT_ROOT / "scripts" / "rsf_video_colmap.sh"),
+            "--run-dir",
+            str(run),
+            "--allow-missing",
+        ],
+        env={**os.environ, "COLMAP_BIN": str(tmp_path / "missing-colmap")},
+        check=True,
+        cwd=PROJECT_ROOT,
+    )
+
+    status = json.loads((run / "video" / "colmap_status.json").read_text(encoding="utf-8"))
+    assert status["status"] == "missing_colmap"
+    assert status["frames_dir"] == str(frames)
+
+
+def test_video_m7_script_runs_video_prep_and_records_missing_colmap(tmp_path):
+    video = tmp_path / "phone.avi"
+    out = tmp_path / "m7"
+    _write_test_video(video)
+
+    env = os.environ.copy()
+    env["RSF_PYTHON"] = sys.executable
+    env["COLMAP_BIN"] = str(tmp_path / "missing-colmap")
+    subprocess.run(
+        [
+            "bash",
+            str(PROJECT_ROOT / "scripts" / "rsf_video_m7.sh"),
+            "--video",
+            str(video),
+            "--out",
+            str(out),
+            "--frame-stride",
+            "1",
+            "--reference-frame-index",
+            "0",
+        ],
+        env=env,
+        check=True,
+        cwd=PROJECT_ROOT,
+    )
+
+    assert (out / "video" / "video_manifest.json").is_file()
+    status = json.loads((out / "video" / "colmap_status.json").read_text(encoding="utf-8"))
+    assert status["status"] == "missing_colmap"
