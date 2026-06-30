@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "real2sim-scene-foundry"
+version = "0.1.0"
+description = "SimFoundry-style real-to-sim scene reconstruction MVP."
+requires-python = ">=3.10"
+dependencies = [
+  "numpy",
+  "opencv-python",
+  "Pillow",
+  "requests",
+  "scipy",
+  "trimesh",
+  "pyyaml",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+rsf = "real2sim_scene_foundry.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
