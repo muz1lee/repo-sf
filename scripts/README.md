@@ -27,7 +27,20 @@ scripts/rsf_video_m7.sh \
 ```
 
 This runs video prep and then tries COLMAP. If COLMAP is not installed it writes
-`video/colmap_status.json` with `status=missing_colmap`.
+`video/colmap_status.json` with `status=missing_colmap`. It also runs MoGe on
+the representative frame when the MoGe runtime is available, producing
+`video/moge_reference/reference/pointcloud.ply`.
+
+## MoGe Dense Reference Geometry
+
+```bash
+scripts/rsf_video_moge_background.sh --run-dir runs/desk_cups_001_m7
+```
+
+This is the current dense geometry bridge for the video background branch:
+`video/reference.png` -> dense point map/depth/PLY. It uses
+`/mnt/workspace/wenqian/hawor_runtime/moge_venv/bin/python` and keeps torch/model
+dependencies out of this project's `.venv`.
 
 ## Stereo Full Scene
 

@@ -106,6 +106,41 @@ def test_video_colmap_script_defaults_to_cpu_sift():
     assert '--SiftMatching.use_gpu "$COLMAP_USE_GPU"' in script
 
 
+def test_video_moge_background_script_writes_missing_runtime_status(tmp_path):
+    run = tmp_path / "run"
+    video_dir = run / "video"
+    video_dir.mkdir(parents=True)
+    cv2.imwrite(str(video_dir / "reference.png"), np.zeros((4, 6, 3), dtype=np.uint8))
+
+    subprocess.run(
+        [
+            "bash",
+            str(PROJECT_ROOT / "scripts" / "rsf_video_moge_background.sh"),
+            "--run-dir",
+            str(run),
+            "--allow-missing",
+        ],
+        env={**os.environ, "MOGE_PYTHON": str(tmp_path / "missing-moge-python")},
+        check=True,
+        cwd=PROJECT_ROOT,
+    )
+
+    status = json.loads((run / "video" / "moge_status.json").read_text(encoding="utf-8"))
+    assert status["status"] == "missing_moge_runtime"
+    assert status["input_image"] == str(video_dir / "reference.png")
+    assert status["outputs"]["pointcloud"].endswith("video/moge_reference/reference/pointcloud.ply")
+
+
+def test_video_moge_background_script_uses_existing_moge_runtime():
+    script = (PROJECT_ROOT / "scripts" / "rsf_video_moge_background.sh").read_text(encoding="utf-8")
+
+    assert "/mnt/workspace/wenqian/hawor_runtime/moge_venv/bin/python" in script
+    assert "/mnt/workspace/wenqian/hawor_runtime/MoGe" in script
+    assert "PYTHONPATH=\"$MOGE_ROOT\"" in script
+    assert "--maps" in script
+    assert "--ply" in script
+
+
 def test_video_m7_script_runs_video_prep_and_records_missing_colmap(tmp_path):
     video = tmp_path / "phone.avi"
     out = tmp_path / "m7"
@@ -114,6 +149,7 @@ def test_video_m7_script_runs_video_prep_and_records_missing_colmap(tmp_path):
     env = os.environ.copy()
     env["RSF_PYTHON"] = sys.executable
     env["COLMAP_BIN"] = str(tmp_path / "missing-colmap")
+    env["MOGE_PYTHON"] = str(tmp_path / "missing-moge-python")
     subprocess.run(
         [
             "bash",
@@ -135,3 +171,12 @@ def test_video_m7_script_runs_video_prep_and_records_missing_colmap(tmp_path):
     assert (out / "video" / "video_manifest.json").is_file()
     status = json.loads((out / "video" / "colmap_status.json").read_text(encoding="utf-8"))
     assert status["status"] == "missing_colmap"
+    moge_status = json.loads((out / "video" / "moge_status.json").read_text(encoding="utf-8"))
+    assert moge_status["status"] == "missing_moge_runtime"
+
+
+def test_video_m7_script_runs_moge_background_step():
+    script = (PROJECT_ROOT / "scripts" / "rsf_video_m7.sh").read_text(encoding="utf-8")
+
+    assert "rsf_video_moge_background.sh" in script
+    assert "moge_status.json" in script

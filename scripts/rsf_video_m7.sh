@@ -76,6 +76,7 @@ fi
 
 "${prep_cmd[@]}"
 "${ROOT_DIR}/scripts/rsf_video_colmap.sh" --run-dir "$OUT_DIR" --allow-missing
+"${ROOT_DIR}/scripts/rsf_video_moge_background.sh" --run-dir "$OUT_DIR" --allow-missing
 
 cat <<EOF
 
@@ -83,9 +84,10 @@ M7 video front end complete.
 Run directory: ${OUT_DIR}
 Video manifest: ${OUT_DIR}/video/video_manifest.json
 COLMAP status: ${OUT_DIR}/video/colmap_status.json
+MoGe dense status: ${OUT_DIR}/video/moge_status.json
 
 Remaining M7 steps after COLMAP is available:
-  1. Use camera poses to build BG-only frame set.
-  2. Fit per-scene 3DGS.
+  1. Use foreground masks to build BG-only frame set.
+  2. Fit per-scene 3DGS from camera poses + dense/depth supervision.
   3. Align 3DGS background with object digital twins.
 EOF
