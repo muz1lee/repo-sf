@@ -92,6 +92,20 @@ def test_video_colmap_script_writes_missing_colmap_status(tmp_path):
     assert status["frames_dir"] == str(frames)
 
 
+def test_video_colmap_script_defaults_to_headless_qt():
+    script = (PROJECT_ROOT / "scripts" / "rsf_video_colmap.sh").read_text(encoding="utf-8")
+
+    assert 'export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-offscreen}"' in script
+
+
+def test_video_colmap_script_defaults_to_cpu_sift():
+    script = (PROJECT_ROOT / "scripts" / "rsf_video_colmap.sh").read_text(encoding="utf-8")
+
+    assert 'COLMAP_USE_GPU="${COLMAP_USE_GPU:-0}"' in script
+    assert '--SiftExtraction.use_gpu "$COLMAP_USE_GPU"' in script
+    assert '--SiftMatching.use_gpu "$COLMAP_USE_GPU"' in script
+
+
 def test_video_m7_script_runs_video_prep_and_records_missing_colmap(tmp_path):
     video = tmp_path / "phone.avi"
     out = tmp_path / "m7"

@@ -15,6 +15,8 @@ EOF
 RUN_DIR=""
 ALLOW_MISSING="0"
 COLMAP_BIN="${COLMAP_BIN:-colmap}"
+COLMAP_USE_GPU="${COLMAP_USE_GPU:-0}"
+export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-offscreen}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -101,8 +103,11 @@ mkdir -p "$SPARSE_DIR"
   --database_path "$DATABASE_PATH" \
   --image_path "$FRAMES_DIR" \
   --ImageReader.single_camera 1 \
-  --ImageReader.camera_model OPENCV
-"$COLMAP_BIN" sequential_matcher --database_path "$DATABASE_PATH"
+  --ImageReader.camera_model OPENCV \
+  --SiftExtraction.use_gpu "$COLMAP_USE_GPU"
+"$COLMAP_BIN" sequential_matcher \
+  --database_path "$DATABASE_PATH" \
+  --SiftMatching.use_gpu "$COLMAP_USE_GPU"
 "$COLMAP_BIN" mapper \
   --database_path "$DATABASE_PATH" \
   --image_path "$FRAMES_DIR" \
