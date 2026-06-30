@@ -8,6 +8,7 @@
 
 ## Key Changes
 - 建独立 Python package + CLI：`rsf run --input ... --out ...`，子命令包含 `extract`、`reconstruct`、`align`、`export`、`render`、`smoke`。
+- RGB 视频入口：`rsf video-prep --video phone.mp4 --out runs/<id> --frame-stride 10`，先输出 sampled frames、reference frame 和 `video_manifest.json`；相机位姿和 3DGS 训练是后续步骤。
 - 服务适配器：
   - SAM3：`http://101.132.143.105:5081/segment`
   - SAM3D：`http://101.132.143.105:5077/api/process`
@@ -51,6 +52,7 @@
 - Phase 6：Background 3DGS
   - 单个双目 pair 不足以训练论文里的背景 3DGS；当前输出 proxy background，并在 manifest 中标记 `requires_video_or_multiview`。
   - 当输入是视频/多帧目录时，使用 foreground masks 生成 BG-only video，再接 3DGS runner，输出 splat 路径和 camera trajectory。
+  - 手机 RGB 视频路径先用 `video-prep` 抽帧；下一步需要 COLMAP/SLAM 估每帧相机位姿，再对每帧做 Qwen/SAM foreground removal。
 - Phase 7：Interactive Sim Scene
   - 生成 `exports/run_interactive_scene.py`，用 `/mnt/workspace/wenqian/knowin-world/.venv/bin/python` 加载 manifest。
   - Genesis loader 必须按 manifest 显式应用 mass/friction，并运行 settle steps；本项目 venv 不直接安装 Genesis。

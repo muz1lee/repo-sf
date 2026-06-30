@@ -246,3 +246,34 @@ objects:
 
     assert code == 0
     assert seen == ["http://inpaint/inpaint"]
+
+
+def test_cli_video_prep_writes_manifest(tmp_path):
+    import cv2
+
+    video = tmp_path / "phone.avi"
+    writer = cv2.VideoWriter(str(video), cv2.VideoWriter_fourcc(*"MJPG"), 4.0, (6, 4))
+    assert writer.isOpened()
+    for idx in range(3):
+        frame = np.full((4, 6, 3), idx * 50, dtype=np.uint8)
+        writer.write(frame)
+    writer.release()
+    out = tmp_path / "out"
+
+    code = main(
+        [
+            "video-prep",
+            "--video",
+            str(video),
+            "--out",
+            str(out),
+            "--frame-stride",
+            "1",
+            "--reference-frame-index",
+            "0",
+        ]
+    )
+
+    assert code == 0
+    manifest = json.loads((out / "video" / "video_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["sampled_frame_count"] == 3

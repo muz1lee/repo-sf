@@ -14,6 +14,7 @@ from .defaults import SAM3D_PROCESS_URL, SAM3_SEGMENT_URL
 from .interactive import export_interactive_scene
 from .pipeline import run_extract, run_reconstruct_align, run_smoke_reconstruction
 from .proposals import ObjectProposal, QwenProposalClient, load_object_proposals
+from .video import prepare_rgb_video
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -101,6 +102,17 @@ def main(argv: list[str] | None = None) -> int:
         print(f"wrote {result.script_path}")
         print(f"wrote {result.report_path}")
         return 0
+    if args.command == "video-prep":
+        result = prepare_rgb_video(
+            video_path=args.video,
+            out_dir=args.out,
+            frame_stride=args.frame_stride,
+            max_frames=args.max_frames,
+            reference_frame_index=args.reference_frame_index,
+        )
+        print(f"wrote {result.manifest_path}")
+        print(f"wrote {result.reference_path}")
+        return 0
     parser.error(f"{args.command} is scaffolded but not implemented in V1")
     return 2
 
@@ -114,6 +126,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_reconstruct_parser(subparsers, "reconstruct")
     _add_reconstruct_parser(subparsers, "align")
     _add_interactive_parser(subparsers, "interactive")
+    _add_video_prep_parser(subparsers, "video-prep")
     for name in ("export", "render"):
         subparsers.add_parser(name)
     return parser
@@ -159,6 +172,15 @@ def _add_interactive_parser(subparsers: argparse._SubParsersAction, name: str) -
     parser = subparsers.add_parser(name)
     parser.add_argument("--run-dir", required=True, type=Path)
     parser.add_argument("--settle-steps", type=int, default=100)
+
+
+def _add_video_prep_parser(subparsers: argparse._SubParsersAction, name: str) -> None:
+    parser = subparsers.add_parser(name)
+    parser.add_argument("--video", required=True, type=Path)
+    parser.add_argument("--out", required=True, type=Path)
+    parser.add_argument("--frame-stride", type=int, default=10)
+    parser.add_argument("--max-frames", type=int, default=None)
+    parser.add_argument("--reference-frame-index", type=int, default=0)
 
 
 def _add_stereo_args(parser: argparse.ArgumentParser) -> None:
