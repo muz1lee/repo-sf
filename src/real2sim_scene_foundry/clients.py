@@ -10,6 +10,7 @@ from typing import Any, Sequence
 
 import numpy as np
 import requests
+import trimesh
 from PIL import Image
 
 from .camera import CameraIntrinsics
@@ -134,6 +135,7 @@ class SAM3DClient:
         image_path: str | Path,
         *,
         mask_path: str | Path | None = None,
+        text_prompt: str = "object",
         out_dir: str | Path,
     ) -> SAM3DResult:
         image = Path(image_path)
@@ -144,24 +146,30 @@ class SAM3DClient:
         try:
             image_f = image.open("rb")
             handles.append(image_f)
-            files["image"] = (image.name, image_f, "image/png")
-            if mask_path is not None:
-                mask = Path(mask_path)
-                mask_f = mask.open("rb")
-                handles.append(mask_f)
-                files["mask"] = (mask.name, mask_f, "image/png")
-            response = requests.post(self._process_url, files=files, timeout=self._timeout_s)
+            files["image_file"] = (image.name, image_f, "image/png")
+            response = requests.post(
+                self._process_url,
+                files=files,
+                data={"text_prompt": str(text_prompt)},
+                timeout=self._timeout_s,
+            )
         finally:
             for handle in handles:
                 handle.close()
         response.raise_for_status()
         metadata = response.json()
+        if mask_path is not None:
+            metadata.setdefault("external_mask_path", str(mask_path))
         mesh_path = out / "mesh.glb"
         encoded_mesh = metadata.get("mesh_glb_base64") or metadata.get("glb_base64") or metadata.get("mesh")
         if encoded_mesh:
             if "," in encoded_mesh:
                 encoded_mesh = encoded_mesh.split(",", 1)[1]
             mesh_path.write_bytes(base64.b64decode(encoded_mesh))
+        elif metadata.get("ply_camera_base64"):
+            ply_path = out / "point_cloud.ply"
+            ply_path.write_bytes(_decode_base64_bytes(str(metadata["ply_camera_base64"])))
+            _export_proxy_mesh_from_ply(ply_path, mesh_path)
         else:
             mesh_path.write_bytes(b"")
         (out / "sam3d_metadata.json").write_text(json_dumps(metadata), encoding="utf-8")
@@ -191,6 +199,48 @@ def _encode_image_json(image: Image.Image) -> dict[str, str]:
     buffer = io.BytesIO()
     image.convert("RGB").save(buffer, format="PNG")
     return {"image": base64.b64encode(buffer.getvalue()).decode("ascii")}
+
+
+def _decode_base64_bytes(value: str) -> bytes:
+    if "," in value:
+        value = value.split(",", 1)[1]
+    return base64.b64decode(value)
+
+
+def _export_proxy_mesh_from_ply(ply_path: Path, mesh_path: Path) -> None:
+    loaded = trimesh.load(ply_path, process=False)
+    if isinstance(loaded, trimesh.Trimesh) and len(loaded.faces) > 0:
+        loaded.export(mesh_path)
+        return
+
+    points = _vertices_from_loaded_geometry(loaded)
+    finite = np.all(np.isfinite(points), axis=1)
+    points = points[finite]
+    if points.shape[0] == 0:
+        mesh_path.write_bytes(b"")
+        return
+    center = np.median(points, axis=0)
+    lo = np.percentile(points, 5.0, axis=0)
+    hi = np.percentile(points, 95.0, axis=0)
+    extents = np.maximum(hi - lo, np.array([0.01, 0.01, 0.01], dtype=np.float64))
+    mesh = trimesh.creation.box(extents=extents)
+    mesh.apply_translation(center)
+    mesh.export(mesh_path)
+
+
+def _vertices_from_loaded_geometry(loaded: Any) -> np.ndarray:
+    if isinstance(loaded, trimesh.points.PointCloud):
+        return np.asarray(loaded.vertices, dtype=np.float64)
+    if isinstance(loaded, trimesh.Trimesh):
+        return np.asarray(loaded.vertices, dtype=np.float64)
+    if isinstance(loaded, trimesh.Scene):
+        vertices = []
+        for geom in loaded.geometry.values():
+            if hasattr(geom, "vertices"):
+                vertices.append(np.asarray(geom.vertices, dtype=np.float64))
+        if vertices:
+            return np.concatenate(vertices, axis=0)
+    return np.zeros((0, 3), dtype=np.float64)
 
 
 def json_dumps(data: dict[str, Any]) -> str:

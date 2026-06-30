@@ -96,7 +96,7 @@ def test_sam3_client_sends_text_prompt(monkeypatch, tmp_path):
     assert result.all()
 
 
-def test_sam3d_client_writes_base64_mesh_and_metadata(monkeypatch, tmp_path):
+def test_sam3d_client_posts_service_contract_and_writes_base64_mesh(monkeypatch, tmp_path):
     image = tmp_path / "frame.png"
     mask = tmp_path / "mask.png"
     out = tmp_path / "sam3d"
@@ -111,14 +111,46 @@ def test_sam3d_client_writes_base64_mesh_and_metadata(monkeypatch, tmp_path):
     }
     seen = []
 
-    def fake_post(url, files, timeout):
-        seen.append((url, sorted(files)))
+    def fake_post(url, files, data, timeout):
+        seen.append((url, sorted(files), dict(data)))
         return DummyResponse(json_data=payload)
 
     monkeypatch.setattr("real2sim_scene_foundry.clients.requests.post", fake_post)
 
-    result = SAM3DClient("http://sam3d/api/process").process(image, mask_path=mask, out_dir=out)
+    result = SAM3DClient("http://sam3d/api/process").process(image, mask_path=mask, text_prompt="red cup", out_dir=out)
 
-    assert seen == [("http://sam3d/api/process", ["image", "mask"])]
+    assert seen == [("http://sam3d/api/process", ["image_file"], {"text_prompt": "red cup"})]
     assert result.mesh_path.read_bytes() == b"glb-bytes"
     assert result.metadata["T_model_to_camera"][2][3] == 1
+
+
+def test_sam3d_client_converts_ply_camera_response_to_proxy_mesh(monkeypatch, tmp_path):
+    image = tmp_path / "frame.png"
+    out = tmp_path / "sam3d"
+    Image.new("RGB", (2, 2)).save(image)
+    import base64
+
+    ply = b"""ply
+format ascii 1.0
+element vertex 4
+property float x
+property float y
+property float z
+end_header
+0 0 1
+1 0 1
+0 1 1
+1 1 2
+"""
+    payload = {"success": True, "ply_camera_base64": base64.b64encode(ply).decode("ascii")}
+
+    def fake_post(url, files, data, timeout):
+        return DummyResponse(json_data=payload)
+
+    monkeypatch.setattr("real2sim_scene_foundry.clients.requests.post", fake_post)
+
+    result = SAM3DClient("http://sam3d/api/process").process(image, text_prompt="cup", out_dir=out)
+
+    assert (out / "point_cloud.ply").read_bytes() == ply
+    assert result.mesh_path.name == "mesh.glb"
+    assert result.mesh_path.stat().st_size > 0
