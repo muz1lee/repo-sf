@@ -160,6 +160,9 @@ def test_run_video_reference_scene_builds_objects_and_attaches_3dgs_background(t
     assert manifest["objects"][0]["object_id"] == "cup"
     assert manifest["background"]["status"] == "trained_video_3dgs"
     assert manifest["background"]["gaussian_splat_config_path"] == "video/3dgs/run/config.yml"
+    assert manifest["support_plane"]["status"] == "estimated"
+    assert manifest["support_plane"]["height_world_m"] == 0.0
     assert (run / "exports" / "run_interactive_scene.py").is_file()
     interaction = json.loads((run / "qa" / "interaction_report.json").read_text(encoding="utf-8"))
     assert interaction["background"]["status"] == "trained_video_3dgs"
+    assert interaction["support_plane"]["status"] == "estimated"

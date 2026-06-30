@@ -1,0 +1,169 @@
+import json
+from pathlib import Path
+
+import numpy as np
+import pytest
+import trimesh
+from PIL import Image
+
+from real2sim_scene_foundry.support_plane import estimate_and_apply_support_plane
+
+
+def _write_object(run_dir: Path, object_id: str, *, extents: tuple[float, float, float], world_z: float) -> None:
+    object_dir = run_dir / "objects" / object_id
+    object_dir.mkdir(parents=True)
+    mesh_path = object_dir / "mesh_aligned.glb"
+    trimesh.creation.box(extents=extents).export(mesh_path)
+    transform = [[1, 0, 0, 0.0], [0, 1, 0, 0.0], [0, 0, 1, world_z], [0, 0, 0, 1]]
+    (object_dir / "pose.json").write_text(
+        json.dumps(
+            {
+                "object_id": object_id,
+                "label": object_id,
+                "T_object_to_camera": transform,
+                "T_object_to_world": transform,
+                "mesh_path": str(mesh_path.relative_to(run_dir)),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_run(run_dir: Path) -> None:
+    _write_object(run_dir, "cup", extents=(0.2, 0.2, 0.2), world_z=0.35)
+    _write_object(run_dir, "bottle", extents=(0.2, 0.2, 0.4), world_z=0.45)
+    objects = []
+    for object_id in ("cup", "bottle"):
+        pose = json.loads((run_dir / "objects" / object_id / "pose.json").read_text(encoding="utf-8"))
+        objects.append(
+            {
+                "object_id": object_id,
+                "label": object_id,
+                "mesh_path": f"objects/{object_id}/mesh_aligned.glb",
+                "mask_path": f"objects/{object_id}/mask.png",
+                "crop_path": f"objects/{object_id}/crop.png",
+                "T_object_to_camera": pose["T_object_to_camera"],
+                "T_object_to_world": pose["T_object_to_world"],
+                "scale_m": 0.2,
+                "mass_kg": 0.25,
+                "friction": 0.8,
+                "confidence": 0.9,
+                "source_backend": "sam3d_aligned",
+                "needs_manual_refine": False,
+            }
+        )
+    (run_dir / "scene_manifest.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "coordinate_frames": {
+                    "camera": "opencv_x_right_y_down_z_forward_meters",
+                    "world": "z_up_ground_plane_meters",
+                },
+                "objects": objects,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "exports").mkdir()
+    (run_dir / "exports" / "scene.usda").write_text(
+        '#usda 1.0\n'
+        'def Xform "World"\n'
+        "{\n"
+        '    def Xform "cup"\n'
+        "    {\n"
+        '        custom string mesh_path = "objects/cup/mesh_aligned.glb"\n'
+        "        double3 xformOp:translate = (0, 0, 0.35)\n"
+        '        uniform token[] xformOpOrder = ["xformOp:translate"]\n'
+        "    }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    (run_dir / "qa").mkdir()
+    (run_dir / "qa" / "qa_report.json").write_text(json.dumps({"objects": []}), encoding="utf-8")
+
+
+def test_estimate_and_apply_support_plane_normalizes_object_bottoms_and_reports(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _write_run(run_dir)
+
+    report = estimate_and_apply_support_plane(run_dir)
+
+    assert report["status"] == "estimated"
+    assert report["source_backend"] == "object_mesh_bottom_median"
+    assert report["original_height_world_m"] == pytest.approx(0.25)
+    assert report["height_world_m"] == 0.0
+    manifest = json.loads((run_dir / "scene_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["support_plane"]["applied_to_world_frame"] is True
+    by_id = {obj["object_id"]: obj for obj in manifest["objects"]}
+    assert by_id["cup"]["T_object_to_world"][2][3] == pytest.approx(0.10)
+    assert by_id["bottle"]["T_object_to_world"][2][3] == pytest.approx(0.20)
+    for object_id in ("cup", "bottle"):
+        pose = json.loads((run_dir / "objects" / object_id / "pose.json").read_text(encoding="utf-8"))
+        assert pose["T_object_to_world"][2][3] == pytest.approx(by_id[object_id]["T_object_to_world"][2][3])
+    qa = json.loads((run_dir / "qa" / "qa_report.json").read_text(encoding="utf-8"))
+    assert qa["support_plane"]["object_bottoms_after_m"]["cup"] == pytest.approx(0.0, abs=1e-8)
+    assert qa["support_plane"]["object_bottoms_after_m"]["bottle"] == pytest.approx(0.0, abs=1e-8)
+    assert qa["support_plane"]["object_vertical_corrections_m"]["cup"] == pytest.approx(0.0, abs=1e-8)
+    assert qa["support_plane"]["object_vertical_corrections_m"]["bottle"] == pytest.approx(0.0, abs=1e-8)
+    assert "0.1" in (run_dir / "exports" / "scene.usda").read_text(encoding="utf-8")
+
+
+def test_estimate_and_apply_support_plane_is_idempotent(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _write_run(run_dir)
+
+    estimate_and_apply_support_plane(run_dir)
+    first = json.loads((run_dir / "scene_manifest.json").read_text(encoding="utf-8"))
+    estimate_and_apply_support_plane(run_dir)
+    second = json.loads((run_dir / "scene_manifest.json").read_text(encoding="utf-8"))
+
+    assert second["objects"] == first["objects"]
+    assert second["support_plane"] == first["support_plane"]
+
+
+def test_estimate_and_apply_support_plane_force_recomputes_existing_report(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _write_run(run_dir)
+    estimate_and_apply_support_plane(run_dir)
+    manifest = json.loads((run_dir / "scene_manifest.json").read_text(encoding="utf-8"))
+    manifest["objects"][0]["T_object_to_world"][2][3] += 0.5
+    (run_dir / "scene_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    skipped = estimate_and_apply_support_plane(run_dir)
+    skipped_manifest = json.loads((run_dir / "scene_manifest.json").read_text(encoding="utf-8"))
+    forced = estimate_and_apply_support_plane(run_dir, force=True)
+
+    assert skipped == manifest["support_plane"]
+    assert skipped_manifest["objects"][0]["T_object_to_world"][2][3] == pytest.approx(0.6)
+    assert forced["object_bottoms_after_m"]["cup"] == pytest.approx(0.0, abs=1e-8)
+
+
+def test_estimate_and_apply_support_plane_prefers_background_point_ring(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _write_run(run_dir)
+    xyz = np.zeros((7, 7, 3), dtype=np.float32)
+    xyz[..., 1] = -0.12
+    xyz[..., 2] = 1.0
+    np.save(run_dir / "xyz.npy", xyz)
+    for object_id, xy in {"cup": (3, 3), "bottle": (1, 1)}.items():
+        mask = np.zeros((7, 7), dtype=np.uint8)
+        mask[xy[1], xy[0]] = 255
+        Image.fromarray(mask).save(run_dir / "objects" / object_id / "mask.png")
+
+    report = estimate_and_apply_support_plane(run_dir)
+
+    assert report["source_backend"] == "background_point_ring_median"
+    assert report["original_height_world_m"] == pytest.approx(0.12)
+    manifest = json.loads((run_dir / "scene_manifest.json").read_text(encoding="utf-8"))
+    by_id = {obj["object_id"]: obj for obj in manifest["objects"]}
+    assert by_id["cup"]["T_object_to_world"][2][3] == pytest.approx(0.10)
+    assert by_id["bottle"]["T_object_to_world"][2][3] == pytest.approx(0.20)
+    assert manifest["support_plane"]["object_bottoms_after_m"]["cup"] == pytest.approx(0.0, abs=1e-8)
+    assert manifest["support_plane"]["object_bottoms_after_m"]["bottle"] == pytest.approx(0.0, abs=1e-8)
+    assert manifest["support_plane"]["object_vertical_corrections_m"]["cup"] == pytest.approx(-0.13)
+    assert manifest["support_plane"]["object_vertical_corrections_m"]["bottle"] == pytest.approx(-0.13)

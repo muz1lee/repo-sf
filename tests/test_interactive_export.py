@@ -24,6 +24,13 @@ def _write_manifest(run_dir):
                     "point_cloud_path": "background/bg_only_cloud.ply",
                     "status": "proxy_from_single_stereo_pair",
                 },
+                "support_plane": {
+                    "status": "estimated",
+                    "source_backend": "object_mesh_bottom_median",
+                    "height_world_m": 0.0,
+                    "normal_world": [0.0, 0.0, 1.0],
+                    "applied_to_world_frame": True,
+                },
                 "objects": [
                     {
                         "object_id": "cup",
@@ -55,6 +62,7 @@ def test_export_interactive_scene_writes_genesis_launcher_and_proxy_settle(tmp_p
     result = export_interactive_scene(run_dir, settle_steps=25)
 
     script = result.script_path.read_text(encoding="utf-8")
+    compile(script, str(result.script_path), "exec")
     assert "gs.morphs.Mesh" in script
     assert "gs.materials.Rigid" in script
     assert "set_mass" in script
@@ -63,6 +71,7 @@ def test_export_interactive_scene_writes_genesis_launcher_and_proxy_settle(tmp_p
     assert "--backend" in script
     assert "gs.cpu" in script
     report = json.loads(result.report_path.read_text(encoding="utf-8"))
+    assert report["support_plane"]["status"] == "estimated"
     assert report["physics_settle"]["status"] == "proxy_checked"
     assert report["physics_settle"]["settle_steps"] == 25
     assert report["objects"][0]["object_id"] == "cup"

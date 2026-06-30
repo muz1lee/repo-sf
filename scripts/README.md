@@ -91,6 +91,19 @@ launcher, and optionally runs no-viewer Genesis settle. The Genesis launcher
 currently loads physics objects and a plane; the 3DGS background is inspected in
 Nerfstudio via `rsf_video_view_3dgs.sh`.
 
+Existing reconstructed runs can be normalized without rerunning Qwen/SAM/SAM3D:
+
+```bash
+source .venv/bin/activate
+rsf support-plane --run-dir runs/desk_cups_001_m7
+```
+
+This estimates the support plane from `xyz.npy` and object-mask background rings,
+falling back to mesh bottoms when dense points are unavailable. It shifts object
+world poses so the Genesis/Isaac support plane is `z=0` and writes the result to
+`scene_manifest.json`, `exports/scene.usda`, object `pose.json`, and QA.
+Use `--force` to recompute a run that already has a `support_plane` entry.
+
 ## Stereo Full Scene
 
 ```bash
@@ -110,3 +123,6 @@ then runs Genesis no-viewer settle through the knowin-world venv.
 ```bash
 scripts/rsf_genesis_settle.sh --run-dir runs/041_stereo_full --settle-steps 5
 ```
+
+This wrapper first runs `rsf support-plane`, then regenerates the interactive
+launcher and executes Genesis through the knowin-world virtual environment.

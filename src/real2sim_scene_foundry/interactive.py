@@ -36,6 +36,7 @@ def export_interactive_scene(run_dir: str | Path, *, settle_steps: int = 100) ->
             f"{script_path} --run-dir {run} --settle-steps {int(settle_steps)} --backend cpu"
         ),
         "background": _background_report(manifest.get("background")),
+        "support_plane": _support_plane_report(manifest.get("support_plane")),
         "physics_settle": {
             "status": "proxy_checked",
             "settle_steps": int(settle_steps),
@@ -48,6 +49,19 @@ def export_interactive_scene(run_dir: str | Path, *, settle_steps: int = 100) ->
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     _merge_qa_physics_settle(run, report["physics_settle"])
     return InteractiveExportResult(script_path=script_path, report_path=report_path)
+
+
+def _support_plane_report(support_plane: dict[str, object] | None) -> dict[str, object]:
+    if not support_plane:
+        return {"status": "absent"}
+    return {
+        "status": support_plane.get("status", "unknown"),
+        "source_backend": support_plane.get("source_backend", "unknown"),
+        "height_world_m": support_plane.get("height_world_m"),
+        "original_height_world_m": support_plane.get("original_height_world_m"),
+        "applied_to_world_frame": support_plane.get("applied_to_world_frame", False),
+        "normal_world": support_plane.get("normal_world"),
+    }
 
 
 def _background_report(background: dict[str, object] | None) -> dict[str, object]:
@@ -180,6 +194,7 @@ def main() -> int:
         "settle_steps": int(args.settle_steps),
         "object_count": len(entities),
         "nan_detected": False,
+        "support_plane": manifest.get("support_plane", {"status": "absent"}),
     }
     (qa_dir / "genesis_settle_report.json").write_text(
         json.dumps(settle_report, indent=2),

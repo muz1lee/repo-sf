@@ -67,6 +67,8 @@ if [[ ! -x "$KNOWIN_WORLD_PYTHON" ]]; then
 fi
 
 export PYTHONPATH="${ROOT_DIR}/src:${PYTHONPATH:-}"
+"$RSF_PYTHON" -m real2sim_scene_foundry.cli support-plane \
+  --run-dir "$RUN_DIR"
 "$RSF_PYTHON" -m real2sim_scene_foundry.cli interactive \
   --run-dir "$RUN_DIR" \
   --settle-steps "$SETTLE_STEPS"

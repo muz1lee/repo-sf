@@ -65,6 +65,7 @@ def test_genesis_settle_script_uses_knowin_world_python():
 
     assert "/mnt/workspace/wenqian/knowin-world/.venv/bin/python" in script
     assert "run_interactive_scene.py" in script
+    assert "support-plane" in script
     assert "real2sim_scene_foundry.cli" in script
     assert "--backend" in script
     assert 'GENESIS_BACKEND="${GENESIS_BACKEND:-cpu}"' in script

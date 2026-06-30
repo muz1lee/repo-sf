@@ -20,6 +20,7 @@ from .interactive import export_interactive_scene
 from .manifest import SceneBackground
 from .pipeline import MaskClient, MeshClient, ReconstructionResult, run_extract, run_reconstruct_align
 from .proposals import ObjectProposal, QwenProposalClient
+from .support_plane import estimate_and_apply_support_plane
 
 
 class ProposalClient:
@@ -138,6 +139,7 @@ def run_video_reference_scene(
         sam3d_client=sam3d_client or SAM3DClient(SAM3D_PROCESS_URL),
     )
     attach_video_3dgs_background(run)
+    estimate_and_apply_support_plane(run)
     interactive = export_interactive_scene(run, settle_steps=settle_steps)
     return VideoReferenceSceneResult(
         run_dir=run,

@@ -1,6 +1,7 @@
 import json
 
 import numpy as np
+import pytest
 from PIL import Image
 
 from real2sim_scene_foundry.cli import main
@@ -190,6 +191,57 @@ def test_cli_interactive_writes_scene_launcher(tmp_path):
     assert (run / "exports" / "run_interactive_scene.py").is_file()
     report = json.loads((run / "qa" / "interaction_report.json").read_text(encoding="utf-8"))
     assert report["physics_settle"]["status"] == "proxy_checked"
+
+
+def test_cli_support_plane_updates_existing_scene(tmp_path):
+    import trimesh
+
+    run = tmp_path / "run"
+    mesh = run / "objects" / "cup" / "mesh_aligned.glb"
+    mesh.parent.mkdir(parents=True)
+    trimesh.creation.box(extents=(0.1, 0.1, 0.2)).export(mesh)
+    transform = [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0.3], [0, 0, 0, 1]]
+    (mesh.parent / "pose.json").write_text(
+        json.dumps({"object_id": "cup", "T_object_to_world": transform}),
+        encoding="utf-8",
+    )
+    (run / "exports").mkdir(parents=True)
+    (run / "qa").mkdir()
+    (run / "qa" / "qa_report.json").write_text(json.dumps({}), encoding="utf-8")
+    (run / "scene_manifest.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "coordinate_frames": {
+                    "camera": "opencv_x_right_y_down_z_forward_meters",
+                    "world": "z_up_ground_plane_meters",
+                },
+                "objects": [
+                    {
+                        "object_id": "cup",
+                        "label": "cup",
+                        "mesh_path": "objects/cup/mesh_aligned.glb",
+                        "mask_path": "objects/cup/mask.png",
+                        "crop_path": "objects/cup/crop.png",
+                        "T_object_to_camera": transform,
+                        "T_object_to_world": transform,
+                        "scale_m": 0.2,
+                        "mass_kg": 0.2,
+                        "friction": 0.8,
+                        "confidence": 0.9,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    code = main(["support-plane", "--run-dir", str(run)])
+
+    assert code == 0
+    manifest = json.loads((run / "scene_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["support_plane"]["status"] == "estimated"
+    assert manifest["objects"][0]["T_object_to_world"][2][3] == pytest.approx(0.1)
 
 
 def test_cli_extract_passes_http_inpaint_client(tmp_path, monkeypatch):

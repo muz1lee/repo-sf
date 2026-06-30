@@ -14,6 +14,7 @@ from .defaults import SAM3D_PROCESS_URL, SAM3_SEGMENT_URL
 from .interactive import export_interactive_scene
 from .pipeline import run_extract, run_reconstruct_align, run_smoke_reconstruction
 from .proposals import ObjectProposal, QwenProposalClient, load_object_proposals
+from .support_plane import estimate_and_apply_support_plane
 from .video import prepare_rgb_video
 from .video_scene import run_video_reference_scene
 
@@ -103,6 +104,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"wrote {result.script_path}")
         print(f"wrote {result.report_path}")
         return 0
+    if args.command == "support-plane":
+        report = estimate_and_apply_support_plane(args.run_dir, force=args.force)
+        print(f"support_plane status={report['status']} source={report['source_backend']}")
+        print(f"wrote {Path(args.run_dir) / 'scene_manifest.json'}")
+        return 0
     if args.command == "video-prep":
         result = prepare_rgb_video(
             video_path=args.video,
@@ -147,6 +153,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_reconstruct_parser(subparsers, "reconstruct")
     _add_reconstruct_parser(subparsers, "align")
     _add_interactive_parser(subparsers, "interactive")
+    _add_support_plane_parser(subparsers)
     _add_video_prep_parser(subparsers, "video-prep")
     _add_video_scene_parser(subparsers, "video-scene")
     for name in ("export", "render"):
@@ -194,6 +201,12 @@ def _add_interactive_parser(subparsers: argparse._SubParsersAction, name: str) -
     parser = subparsers.add_parser(name)
     parser.add_argument("--run-dir", required=True, type=Path)
     parser.add_argument("--settle-steps", type=int, default=100)
+
+
+def _add_support_plane_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser("support-plane")
+    parser.add_argument("--run-dir", required=True, type=Path)
+    parser.add_argument("--force", action="store_true", help="Recompute and reapply even if support_plane already exists")
 
 
 def _add_video_prep_parser(subparsers: argparse._SubParsersAction, name: str) -> None:
