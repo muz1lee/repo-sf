@@ -174,6 +174,10 @@ def test_video_3dgs_script_writes_missing_runtime_status(tmp_path):
     cv2.imwrite(str(bg_frames / "frame_000000.png"), np.zeros((4, 6, 3), dtype=np.uint8))
     for name in ("cameras.bin", "images.bin", "points3D.bin"):
         (sparse / name).write_bytes(b"x")
+    (run / "video" / "video_manifest.json").write_text(
+        json.dumps({"background_3dgs": {"status": "ready_for_training"}}),
+        encoding="utf-8",
+    )
 
     subprocess.run(
         [
@@ -203,6 +207,10 @@ def test_video_3dgs_script_records_latest_training_outputs(tmp_path):
     cv2.imwrite(str(bg_frames / "frame_000000.png"), np.zeros((4, 6, 3), dtype=np.uint8))
     for name in ("cameras.bin", "images.bin", "points3D.bin"):
         (sparse / name).write_bytes(b"x")
+    (run / "video" / "video_manifest.json").write_text(
+        json.dumps({"background_3dgs": {"status": "ready_for_training"}}),
+        encoding="utf-8",
+    )
 
     fake_ns_train = tmp_path / "ns-train"
     fake_ns_train.write_text(
@@ -251,6 +259,9 @@ printf "ckpt" > "$output_dir/unnamed/splatfacto/test-run/nerfstudio_models/step-
         status["outputs"]["latest_checkpoint"]
         == "video/3dgs/unnamed/splatfacto/test-run/nerfstudio_models/step-000000007.ckpt"
     )
+    manifest = json.loads((run / "video" / "video_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["background_3dgs"]["status"] == "completed"
+    assert manifest["background_3dgs"]["latest_config"] == status["outputs"]["latest_config"]
 
 
 def test_video_3dgs_script_runs_headless_tensorboard_visualizer():

@@ -128,6 +128,20 @@ Path(path).write_text(
     ),
     encoding="utf-8",
 )
+if status == "completed":
+    manifest_path = run_path / "video" / "video_manifest.json"
+    if manifest_path.is_file():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["background_3dgs"] = {
+            "status": "completed",
+            "status_json": "video/3dgs_status.json",
+            "dataset_dir": "video/nerfstudio_bg",
+            "output_dir": "video/3dgs",
+            "latest_run_dir": rel(latest_run_dir),
+            "latest_config": rel(latest_config),
+            "latest_checkpoint": rel(latest_checkpoint),
+        }
+        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 PY
 }
 
