@@ -18,7 +18,7 @@ def estimate_and_apply_support_plane(run_dir: str | Path, *, force: bool = False
     manifest_path = run / "scene_manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     existing = manifest.get("support_plane")
-    if not force and isinstance(existing, dict) and existing.get("applied_to_world_frame") is True:
+    if not force and _support_plane_is_complete(run, existing):
         _merge_qa_support_plane(run, existing)
         return existing
 
@@ -48,6 +48,7 @@ def estimate_and_apply_support_plane(run_dir: str | Path, *, force: bool = False
         _update_pose_file(run, item["object_id"], transform)
 
     after_bottoms = _object_bottoms(run, objects)
+    table_report = _write_table_collision_mesh(run, objects, support_height_m=height)
     support_plane = {
         "status": "estimated",
         "source_backend": source,
@@ -61,12 +62,27 @@ def estimate_and_apply_support_plane(run_dir: str | Path, *, force: bool = False
         "object_bottoms_after_global_shift_m": {key: float(value) for key, value in bottoms_after_global_shift.items()},
         "object_vertical_corrections_m": {key: float(value) for key, value in object_corrections.items()},
         "object_bottoms_after_m": {key: float(value) for key, value in after_bottoms.items()},
+        **table_report,
     }
     manifest["support_plane"] = support_plane
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     _write_usda_stub_from_manifest(run / "exports" / "scene.usda", manifest)
     _merge_qa_support_plane(run, support_plane)
     return support_plane
+
+
+def _support_plane_is_complete(run: Path, support_plane: object) -> bool:
+    if not isinstance(support_plane, dict):
+        return False
+    if support_plane.get("applied_to_world_frame") is not True:
+        return False
+    table_path = support_plane.get("table_collision_mesh_path")
+    return bool(
+        table_path
+        and (run / str(table_path)).is_file()
+        and support_plane.get("table_collision_pos_world")
+        and support_plane.get("table_collision_size_xyz")
+    )
 
 
 def _estimate_height_from_point_rings(run: Path, objects: list[dict[str, Any]]) -> tuple[float | None, str]:
@@ -109,6 +125,98 @@ def _estimate_height_from_point_rings(run: Path, objects: list[dict[str, Any]]) 
     if not heights:
         return None, "unavailable"
     return float(np.median(heights)), "background_point_ring_median"
+
+
+def _write_table_collision_mesh(run: Path, objects: list[dict[str, Any]], *, support_height_m: float) -> dict[str, Any]:
+    bounds, source = _table_bounds_from_background_points(run, objects, support_height_m=support_height_m)
+    if bounds is None:
+        bounds = _table_bounds_from_objects(run, objects)
+        source = "object_bounds_rect"
+    (x0, y0), (x1, y1) = bounds
+    thickness = 0.04
+    extent_x = max(0.2, float(x1 - x0))
+    extent_y = max(0.2, float(y1 - y0))
+    center = [float((x0 + x1) * 0.5), float((y0 + y1) * 0.5), float(-thickness * 0.5)]
+    size = [float(extent_x), float(extent_y), float(thickness)]
+    mesh = trimesh.creation.box(extents=size)
+    table_path = run / "background" / "table_collision.glb"
+    table_path.parent.mkdir(parents=True, exist_ok=True)
+    mesh.export(table_path)
+    return {
+        "table_collision_mesh_path": str(table_path.relative_to(run)),
+        "table_collision_source_backend": source,
+        "table_bounds_world_xy": [[float(x0), float(y0)], [float(x1), float(y1)]],
+        "table_collision_pos_world": center,
+        "table_collision_quat_wxyz": [1.0, 0.0, 0.0, 0.0],
+        "table_collision_size_xyz": size,
+        "table_top_z_m": 0.0,
+        "table_thickness_m": float(thickness),
+    }
+
+
+def _table_bounds_from_background_points(
+    run: Path,
+    objects: list[dict[str, Any]],
+    *,
+    support_height_m: float,
+) -> tuple[tuple[tuple[float, float], tuple[float, float]] | None, str]:
+    xyz_path = run / "xyz.npy"
+    if not xyz_path.is_file():
+        return None, "unavailable"
+    xyz = np.load(xyz_path)
+    if xyz.ndim != 3 or xyz.shape[2] != 3:
+        return None, "unavailable"
+    foreground = np.zeros(xyz.shape[:2], dtype=bool)
+    for item in objects:
+        mask_path = run / str(item.get("mask_path", ""))
+        if not mask_path.is_file():
+            continue
+        mask = np.asarray(Image.open(mask_path).convert("L")) > 0
+        if mask.shape == xyz.shape[:2]:
+            foreground |= mask
+
+    valid = np.all(np.isfinite(xyz), axis=2) & (xyz[..., 2] > 0.0)
+    world_z = -np.asarray(xyz[..., 1], dtype=np.float64) - float(support_height_m)
+    near_support = valid & ~foreground & (np.abs(world_z) <= 0.06)
+    if np.count_nonzero(near_support) < 16:
+        return None, "unavailable"
+    world_x = np.asarray(xyz[..., 0], dtype=np.float64)[near_support]
+    world_y = np.asarray(xyz[..., 2], dtype=np.float64)[near_support]
+    x0, x1 = np.percentile(world_x, [2.0, 98.0])
+    y0, y1 = np.percentile(world_y, [2.0, 98.0])
+    return _pad_bounds(float(x0), float(y0), float(x1), float(y1), padding=0.08), "background_support_points_rect"
+
+
+def _table_bounds_from_objects(run: Path, objects: list[dict[str, Any]]) -> tuple[tuple[float, float], tuple[float, float]]:
+    vertices = []
+    for item in objects:
+        mesh_vertices = _mesh_vertices(run / str(item["mesh_path"]))
+        transform = _transform_array(item["T_object_to_world"])
+        homogeneous = np.concatenate([mesh_vertices, np.ones((mesh_vertices.shape[0], 1), dtype=np.float64)], axis=1)
+        vertices.append((transform @ homogeneous.T).T[:, :3])
+    points = np.concatenate(vertices, axis=0)
+    return _pad_bounds(
+        float(np.min(points[:, 0])),
+        float(np.min(points[:, 1])),
+        float(np.max(points[:, 0])),
+        float(np.max(points[:, 1])),
+        padding=0.25,
+    )
+
+
+def _pad_bounds(
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+    *,
+    padding: float,
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    if x1 < x0:
+        x0, x1 = x1, x0
+    if y1 < y0:
+        y0, y1 = y1, y0
+    return (x0 - padding, y0 - padding), (x1 + padding, y1 + padding)
 
 
 def _object_bottoms(run: Path, objects: list[dict[str, Any]]) -> dict[str, float]:
@@ -178,6 +286,14 @@ def _write_usda_stub_from_manifest(path: Path, manifest: dict[str, Any]) -> None
     if isinstance(support, dict):
         lines.append(f'    custom string support_plane_status = "{support.get("status", "unknown")}"')
         lines.append(f"    custom double support_plane_height_world_m = {float(support.get('height_world_m', 0.0)):.8g}")
+        if support.get("table_collision_mesh_path"):
+            lines.append(f'    custom string table_collision_mesh_path = "{support["table_collision_mesh_path"]}"')
+        if support.get("table_collision_pos_world"):
+            pos = support["table_collision_pos_world"]
+            lines.append(f"    custom double3 table_collision_pos_world = ({float(pos[0]):.8g}, {float(pos[1]):.8g}, {float(pos[2]):.8g})")
+        if support.get("table_collision_size_xyz"):
+            size = support["table_collision_size_xyz"]
+            lines.append(f"    custom double3 table_collision_size_xyz = ({float(size[0]):.8g}, {float(size[1]):.8g}, {float(size[2]):.8g})")
     for obj in manifest.get("objects", []):
         transform = _transform_array(obj["T_object_to_world"])
         tx, ty, tz = (float(transform[i, 3]) for i in range(3))

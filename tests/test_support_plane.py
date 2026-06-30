@@ -107,6 +107,9 @@ def test_estimate_and_apply_support_plane_normalizes_object_bottoms_and_reports(
     assert qa["support_plane"]["object_bottoms_after_m"]["bottle"] == pytest.approx(0.0, abs=1e-8)
     assert qa["support_plane"]["object_vertical_corrections_m"]["cup"] == pytest.approx(0.0, abs=1e-8)
     assert qa["support_plane"]["object_vertical_corrections_m"]["bottle"] == pytest.approx(0.0, abs=1e-8)
+    table_path = run_dir / qa["support_plane"]["table_collision_mesh_path"]
+    assert table_path.is_file()
+    assert qa["support_plane"]["table_collision_size_xyz"][2] == pytest.approx(0.04)
     assert "0.1" in (run_dir / "exports" / "scene.usda").read_text(encoding="utf-8")
 
 
@@ -147,8 +150,9 @@ def test_estimate_and_apply_support_plane_prefers_background_point_ring(tmp_path
     run_dir.mkdir()
     _write_run(run_dir)
     xyz = np.zeros((7, 7, 3), dtype=np.float32)
+    xyz[..., 0] = np.linspace(-0.3, 0.3, 7)[None, :]
     xyz[..., 1] = -0.12
-    xyz[..., 2] = 1.0
+    xyz[..., 2] = np.linspace(0.8, 1.4, 7)[:, None]
     np.save(run_dir / "xyz.npy", xyz)
     for object_id, xy in {"cup": (3, 3), "bottle": (1, 1)}.items():
         mask = np.zeros((7, 7), dtype=np.uint8)
@@ -167,3 +171,15 @@ def test_estimate_and_apply_support_plane_prefers_background_point_ring(tmp_path
     assert manifest["support_plane"]["object_bottoms_after_m"]["bottle"] == pytest.approx(0.0, abs=1e-8)
     assert manifest["support_plane"]["object_vertical_corrections_m"]["cup"] == pytest.approx(-0.13)
     assert manifest["support_plane"]["object_vertical_corrections_m"]["bottle"] == pytest.approx(-0.13)
+    assert manifest["support_plane"]["table_collision_source_backend"] == "background_support_points_rect"
+    table_path = run_dir / manifest["support_plane"]["table_collision_mesh_path"]
+    assert table_path.is_file()
+    table = trimesh.load(table_path, force="mesh")
+    pos = manifest["support_plane"]["table_collision_pos_world"]
+    assert pos[2] + table.bounds[1, 2] == pytest.approx(0.0, abs=1e-8)
+    assert table.extents[0] >= 0.55
+    assert table.extents[1] >= 0.55
+    assert manifest["support_plane"]["table_collision_size_xyz"] == pytest.approx(table.extents)
+    usda = (run_dir / "exports" / "scene.usda").read_text(encoding="utf-8")
+    assert "table_collision_mesh_path" in usda
+    assert "table_collision_pos_world" in usda

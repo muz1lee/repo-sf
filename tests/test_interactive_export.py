@@ -1,5 +1,6 @@
 import json
 
+import pytest
 import trimesh
 
 from real2sim_scene_foundry.interactive import export_interactive_scene
@@ -9,6 +10,9 @@ def _write_manifest(run_dir):
     mesh_path = run_dir / "objects" / "cup" / "mesh_aligned.glb"
     mesh_path.parent.mkdir(parents=True)
     trimesh.creation.box(extents=(0.1, 0.1, 0.2)).export(mesh_path)
+    table_path = run_dir / "background" / "table_collision.glb"
+    table_path.parent.mkdir(parents=True)
+    trimesh.creation.box(extents=(0.8, 0.6, 0.04), transform=trimesh.transformations.translation_matrix((0.0, 0.0, -0.02))).export(table_path)
     (run_dir / "scene_manifest.json").write_text(
         json.dumps(
             {
@@ -30,6 +34,10 @@ def _write_manifest(run_dir):
                     "height_world_m": 0.0,
                     "normal_world": [0.0, 0.0, 1.0],
                     "applied_to_world_frame": True,
+                    "table_collision_mesh_path": "background/table_collision.glb",
+                    "table_bounds_world_xy": [[-0.4, -0.3], [0.4, 0.3]],
+                    "table_collision_pos_world": [0.0, 0.0, -0.02],
+                    "table_collision_size_xyz": [0.8, 0.6, 0.04],
                 },
                 "objects": [
                     {
@@ -39,7 +47,7 @@ def _write_manifest(run_dir):
                         "mask_path": "objects/cup/mask.png",
                         "crop_path": "objects/cup/crop.png",
                         "T_object_to_camera": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 1], [0, 0, 0, 1]],
-                        "T_object_to_world": [[1, 0, 0, 0.2], [0, 1, 0, 0.3], [0, 0, 1, 0.4], [0, 0, 0, 1]],
+                        "T_object_to_world": [[0, -1, 0, 0.2], [1, 0, 0, 0.3], [0, 0, 1, 0.4], [0, 0, 0, 1]],
                         "scale_m": 0.2,
                         "mass_kg": 0.25,
                         "friction": 0.8,
@@ -70,9 +78,21 @@ def test_export_interactive_scene_writes_genesis_launcher_and_proxy_settle(tmp_p
     assert "qa_report.json" in script
     assert "--backend" in script
     assert "gs.cpu" in script
+    assert "table_collision_mesh_path" in script
+    assert "gs.morphs.Box" in script
+    assert "quat=quat" in script
+    assert "align=False" in script
+    assert "final_pose_by_object" in script
+    assert "penetration_depth_m" in script
+    assert "fall_out" in script
+    assert "get_AABB" in script
+    assert "stability_status" in script
     report = json.loads(result.report_path.read_text(encoding="utf-8"))
     assert report["support_plane"]["status"] == "estimated"
+    assert report["support_plane"]["table_collision_mesh_path"] == "background/table_collision.glb"
+    assert report["support_plane"]["table_collision_size_xyz"] == [0.8, 0.6, 0.04]
     assert report["physics_settle"]["status"] == "proxy_checked"
     assert report["physics_settle"]["settle_steps"] == 25
     assert report["objects"][0]["object_id"] == "cup"
     assert report["objects"][0]["mesh_loadable"] is True
+    assert report["objects"][0]["world_quat_wxyz"] == pytest.approx([0.70710678, 0.0, 0.0, 0.70710678])
