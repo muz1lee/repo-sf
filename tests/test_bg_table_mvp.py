@@ -322,3 +322,132 @@ def test_composite_viewer_bg_table_mode_does_not_require_scene_manifest_or_objec
     assert config["support_plane"]["table_collision_mesh_path"] == "../../table/collision_polygon_slab.glb"
     assert config["camera_frustums"]["count"] == 1
     assert config["qa"]["overlays"] == ["../../qa/bg3dgs_table_overlay_000000.png"]
+
+
+
+def test_fit_tabletop_from_semantic_mask_writes_masked_depth_polygon_and_refined_mask(tmp_path):
+    run = tmp_path / "run"
+    _write_bg_table_run(run)
+    semantic = np.zeros((100, 100), dtype=np.uint8)
+    semantic[30:71, 30:71] = 255
+    semantic_path = run / "qa" / "manual_tabletop_semantic_mask.png"
+    Image.fromarray(semantic).save(semantic_path)
+    confidence_dir = run / "confidence"
+    confidence_dir.mkdir()
+    Image.fromarray(np.full((100, 100), 255, dtype=np.uint8)).save(confidence_dir / "frame_000000.png")
+    trajectory = json.loads((run / "trajectory.json").read_text(encoding="utf-8"))
+    trajectory["frames"][0]["confidence_path"] = "confidence/frame_000000.png"
+    (run / "trajectory.json").write_text(json.dumps(trajectory), encoding="utf-8")
+    (run / "background" / "table_polygon_world.json").unlink()
+    (run / "background" / "tabletop_mask.png").unlink()
+
+    code = main(
+        [
+            "fit-tabletop-from-mask",
+            "--run-dir",
+            str(run),
+            "--mask",
+            str(semantic_path),
+            "--frame-index",
+            "0",
+            "--hull",
+            "convex-hull",
+            "--write",
+        ]
+    )
+
+    assert code == 0
+    report = json.loads((run / "qa" / "tabletop_semantic_fit_report.json").read_text(encoding="utf-8"))
+    polygon = json.loads((run / "background" / "table_polygon_world.json").read_text(encoding="utf-8"))
+    assert (run / "background" / "tabletop_semantic_mask.png").is_file()
+    assert (run / "background" / "tabletop_mask.png").is_file()
+    assert report["status"] == "passed"
+    assert report["source_backend"] == "semantic_masked_arkit_depth_ransac_plane"
+    assert report["semantic_mask_path"] == "background/tabletop_semantic_mask.png"
+    assert report["refined_plane_mask_path"] == "background/tabletop_mask.png"
+    assert report["hull_method"] == "convex-hull"
+    assert report["metrics"]["semantic_mask_area_px"] == int(np.count_nonzero(semantic))
+    assert report["metrics"]["near_plane_mask_area_px"] > 0
+    assert report["metrics"]["plane_residual_median_m"] <= 0.02
+    assert polygon["status"] == "passed"
+    assert polygon["source_backend"] == "semantic_masked_arkit_depth_ransac_plane"
+    assert polygon["semantic_mask_path"] == "background/tabletop_semantic_mask.png"
+    assert polygon["top_z_m"] == pytest.approx(1.0)
+    assert polygon["unit"] == "meter"
+    assert len(polygon["polygon_world_xy"]) >= 3
+
+
+def test_qa_bg_table_uses_semantic_mask_for_raw_projection_gate(tmp_path):
+    run = tmp_path / "run"
+    _write_bg_table_run(run)
+    semantic = np.zeros((100, 100), dtype=np.uint8)
+    semantic[38:63, 38:63] = 255
+    Image.fromarray(semantic).save(run / "background" / "tabletop_semantic_mask.png")
+    main(["build-table-collision", "--run-dir", str(run), "--source", "background/table_polygon_world.json", "--write"])
+
+    code = main(["qa-bg-table", "--run-dir", str(run), "--frames", "0"])
+
+    assert code == 0
+    report = json.loads((run / "qa" / "bg_table_report.json").read_text(encoding="utf-8"))
+    assert report["status"] == "blocked"
+    assert report["table_collision"]["projection_mask_source"] == "semantic_tabletop_mask"
+    assert report["table_collision"]["projection_mask_path"] == "background/tabletop_semantic_mask.png"
+    assert report["table_collision"]["raw_overreach_ratio"] > 0.15
+    assert "overreach_ratio_above_threshold" in report["blocking_reasons"]
+    assert report["claim"] is None
+
+
+
+def test_fit_tabletop_from_mask_blocked_does_not_claim_written_geometry(tmp_path, capsys):
+    run = tmp_path / "run"
+    _write_bg_table_run(run)
+    (run / "background" / "tabletop_semantic_mask.png").unlink(missing_ok=True)
+
+    code = main(["fit-tabletop-from-mask", "--run-dir", str(run), "--write"])
+
+    captured = capsys.readouterr().out
+    report = json.loads((run / "qa" / "tabletop_semantic_fit_report.json").read_text(encoding="utf-8"))
+    assert code == 0
+    assert report["status"] == "blocked"
+    assert "tabletop_semantic_mask_missing" in report["blocking_reasons"]
+    assert "background/tabletop_semantic_mask.png" not in captured
+    assert "background/table_polygon_world.json" not in captured
+
+
+
+def test_cli_segment_tabletop_mask_writes_standard_semantic_mask(tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    _write_bg_table_run(run)
+    semantic = np.zeros((100, 100), dtype=bool)
+    semantic[30:71, 30:71] = True
+
+    class FakeSAM:
+        def segment_text(self, image_path, text_prompt):  # noqa: ANN001
+            assert Path(image_path).name == "frame_000000.jpg"
+            assert "coffee table top" in text_prompt
+            return semantic
+
+        def segment_box(self, image_path, box_xyxy):  # noqa: ANN001
+            raise AssertionError("text prompt path expected")
+
+    from real2sim_scene_foundry import cli
+
+    monkeypatch.setattr(cli, "_sam3_client_from_args", lambda args: FakeSAM())
+
+    code = cli.main([
+        "segment-tabletop-mask",
+        "--run-dir",
+        str(run),
+        "--frame-index",
+        "0",
+        "--prompt",
+        "tabletop / coffee table top",
+    ])
+
+    assert code == 0
+    report = json.loads((run / "qa" / "tabletop_semantic_mask_report.json").read_text(encoding="utf-8"))
+    assert report["status"] == "passed"
+    assert report["source_backend"] == "sam3_text_prompt"
+    assert report["semantic_mask_path"] == "background/tabletop_semantic_mask.png"
+    assert report["mask_area_px"] == int(np.count_nonzero(semantic))
+    assert (run / "background" / "tabletop_semantic_mask.png").is_file()

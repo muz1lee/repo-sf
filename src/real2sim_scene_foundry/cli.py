@@ -11,7 +11,9 @@ from PIL import Image
 from .background import HTTPInpaintClient
 from .camera import CameraIntrinsics
 from .bg_table import build_table_collision as build_bg_table_collision
+from .bg_table import fit_tabletop_from_semantic_mask
 from .bg_table import qa_bg_table
+from .bg_table import segment_tabletop_semantic_mask
 from .composite_viewer import export_composite_viewer, qa_viewer, serve_composite_viewer
 from .defaults import SAM3D_PROCESS_URL, SAM3_SEGMENT_URL
 from .interactive import export_interactive_scene
@@ -344,6 +346,35 @@ def main(argv: list[str] | None = None) -> int:
         print(f"wrote {Path(args.run_dir) / 'qa' / 'background_registration_report.json'}")
         print(f"status={report.get('status')}")
         return 0
+    if args.command == "segment-tabletop-mask":
+        result = segment_tabletop_semantic_mask(
+            args.run_dir,
+            sam3_client=_sam3_client_from_args(args),
+            prompt=args.prompt,
+            bbox_xyxy=_parse_bbox(args.bbox) if args.bbox else None,
+            frame_index=args.frame_index,
+        )
+        print(f"wrote {result.report_path}")
+        if result.report.get("status") == "passed" and result.mask_path.is_file():
+            print(f"wrote {result.mask_path}")
+        print(f"status={result.report.get('status')}")
+        return 0
+    if args.command == "fit-tabletop-from-mask":
+        result = fit_tabletop_from_semantic_mask(
+            args.run_dir,
+            mask=args.mask,
+            frame_index=args.frame_index,
+            hull=args.hull,
+            plane_distance_threshold_m=args.plane_distance_threshold_m,
+            write=args.write,
+        )
+        print(f"wrote {result.report_path}")
+        if args.write and result.report.get("status") == "passed":
+            for artifact_path in (result.semantic_mask_path, result.refined_mask_path, result.polygon_path):
+                if artifact_path.is_file():
+                    print(f"wrote {artifact_path}")
+        print(f"status={result.report.get('status')}")
+        return 0
     if args.command == "build-table-collision":
         result = build_bg_table_collision(args.run_dir, source=args.source, write=args.write, thickness_m=args.height)
         print(f"wrote {result.mesh_path}")
@@ -404,6 +435,8 @@ def build_parser() -> argparse.ArgumentParser:
     _add_render_3dgs_background_parser(subparsers)
     _add_register_3dgs_parser(subparsers)
     _add_qa_background_registration_parser(subparsers)
+    _add_segment_tabletop_mask_parser(subparsers)
+    _add_fit_tabletop_from_mask_parser(subparsers)
     _add_build_table_collision_parser(subparsers)
     _add_qa_bg_table_parser(subparsers)
     for name in ("export", "render"):
@@ -649,6 +682,25 @@ def _add_qa_background_registration_parser(subparsers: argparse._SubParsersActio
     parser.add_argument("--heldout-frames", type=int, default=16)
 
 
+def _add_segment_tabletop_mask_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser("segment-tabletop-mask")
+    parser.add_argument("--run-dir", required=True, type=Path)
+    parser.add_argument("--frame-index", type=int, default=0)
+    parser.add_argument("--prompt", default="tabletop / coffee table top")
+    parser.add_argument("--bbox", default=None, help="Optional bbox prompt as x0,y0,x1,y1")
+    parser.add_argument("--sam3-url", default=SAM3_SEGMENT_URL)
+
+
+def _add_fit_tabletop_from_mask_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser("fit-tabletop-from-mask")
+    parser.add_argument("--run-dir", required=True, type=Path)
+    parser.add_argument("--mask", default="background/tabletop_semantic_mask.png", type=Path)
+    parser.add_argument("--frame-index", type=int, default=0)
+    parser.add_argument("--hull", choices=("convex-hull", "clipped-convex-hull", "rotated-rectangle"), default="convex-hull")
+    parser.add_argument("--plane-distance-threshold-m", type=float, default=0.02)
+    parser.add_argument("--write", action="store_true")
+
+
 def _add_build_table_collision_parser(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser("build-table-collision")
     parser.add_argument("--run-dir", required=True, type=Path)
@@ -721,6 +773,13 @@ def _parse_int_tuple(value: str, expected: int):
     if len(parts) != expected:
         raise ValueError(f"expected {expected} comma-separated numbers, got {value}")
     return tuple(parts)
+
+
+def _parse_bbox(value: str) -> tuple[int, int, int, int]:
+    parts = [int(round(float(part.strip()))) for part in str(value).split(",") if part.strip()]
+    if len(parts) != 4:
+        raise ValueError("bbox must be x0,y0,x1,y1")
+    return (parts[0], parts[1], parts[2], parts[3])
 
 
 def _parse_orientation_overrides(values: list[str]) -> dict[str, str]:

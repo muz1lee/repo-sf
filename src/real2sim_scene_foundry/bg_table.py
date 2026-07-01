@@ -18,6 +18,8 @@ from .table_collision_qa import _camera_matrix, _mask_iou, _project_vertices, _t
 
 SCOPE_NAME = "background_3dgs_and_table_collision_only"
 TABLE_COLLISION_SOURCE = "arkit_depth_ransac_plane"
+SEMANTIC_TABLE_COLLISION_SOURCE = "semantic_masked_arkit_depth_ransac_plane"
+ALLOWED_TABLE_COLLISION_SOURCES = {TABLE_COLLISION_SOURCE, SEMANTIC_TABLE_COLLISION_SOURCE}
 TABLETOP_IOU_THRESHOLD = 0.65
 VISIBLE_IOU_THRESHOLD = 0.70
 MAX_OVERREACH_RATIO = 0.15
@@ -32,6 +34,22 @@ ARKIT_TO_SIM_BRIDGE_SOURCE = "phone_sim_alignment_arkit_to_sim_world"
 class TableCollisionBuildResult:
     mesh_path: Path
     usd_path: Path
+    report_path: Path
+    report: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class TabletopSemanticFitResult:
+    polygon_path: Path
+    semantic_mask_path: Path
+    refined_mask_path: Path
+    report_path: Path
+    report: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class TabletopSemanticMaskResult:
+    mask_path: Path
     report_path: Path
     report: dict[str, Any]
 
@@ -62,6 +80,247 @@ def write_bg_table_scope(run_dir: str | Path) -> Path:
     }
     path.write_text(json.dumps(scope, indent=2), encoding="utf-8")
     return path
+
+
+def segment_tabletop_semantic_mask(
+    run_dir: str | Path,
+    *,
+    sam3_client: Any,
+    prompt: str = "tabletop / coffee table top",
+    bbox_xyxy: tuple[int, int, int, int] | None = None,
+    frame_index: int = 0,
+) -> TabletopSemanticMaskResult:
+    run = Path(run_dir)
+    bg_dir = run / "background"
+    qa_dir = run / "qa"
+    bg_dir.mkdir(parents=True, exist_ok=True)
+    qa_dir.mkdir(parents=True, exist_ok=True)
+    mask_path = bg_dir / "tabletop_semantic_mask.png"
+    report_path = qa_dir / "tabletop_semantic_mask_report.json"
+    trajectory = _load_json(run / "trajectory.json")
+    frames = _select_trajectory_frames(trajectory, [int(frame_index)])
+    frame = frames[0] if frames else {}
+    image_rel = frame.get("rgb_path") or f"frames/frame_{int(frame_index):06d}.jpg"
+    image_path = run / str(image_rel)
+    if not image_path.is_file():
+        report = {
+            "version": 1,
+            "status": "blocked",
+            "source_backend": "sam3_box_prompt" if bbox_xyxy else "sam3_text_prompt",
+            "frame_index": int(frame_index),
+            "image_path": str(image_rel),
+            "semantic_mask_path": None,
+            "blocking_reasons": ["rgb_frame_missing"],
+        }
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        return TabletopSemanticMaskResult(mask_path, report_path, report)
+
+    if bbox_xyxy is not None:
+        mask = np.asarray(sam3_client.segment_box(image_path, bbox_xyxy), dtype=bool)
+        source_backend = "sam3_box_prompt"
+    else:
+        mask = np.asarray(sam3_client.segment_text(image_path, prompt), dtype=bool)
+        source_backend = "sam3_text_prompt"
+    if mask.ndim != 2 or int(np.count_nonzero(mask)) == 0:
+        report = {
+            "version": 1,
+            "status": "blocked",
+            "source_backend": source_backend,
+            "frame_index": int(frame_index),
+            "image_path": str(image_rel),
+            "semantic_mask_path": None,
+            "mask_area_px": int(np.count_nonzero(mask)) if mask.ndim == 2 else None,
+            "blocking_reasons": ["sam3_tabletop_mask_empty_or_invalid"],
+        }
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        return TabletopSemanticMaskResult(mask_path, report_path, report)
+
+    Image.fromarray(mask.astype(np.uint8) * 255).save(mask_path)
+    report = {
+        "version": 1,
+        "status": "passed",
+        "source_backend": source_backend,
+        "frame_index": int(frame_index),
+        "image_path": str(image_rel),
+        "prompt": None if bbox_xyxy is not None else prompt,
+        "bbox_xyxy": list(bbox_xyxy) if bbox_xyxy is not None else None,
+        "semantic_mask_path": "background/tabletop_semantic_mask.png",
+        "mask_area_px": int(np.count_nonzero(mask)),
+        "claim_boundary": {
+            "semantic_tabletop_localization": "sam3_mask_candidate",
+            "metric_geometry": "not_claimed_until_fit_tabletop_from_mask_uses_phone_depth",
+        },
+    }
+    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    return TabletopSemanticMaskResult(mask_path, report_path, report)
+
+
+def fit_tabletop_from_semantic_mask(
+    run_dir: str | Path,
+    *,
+    mask: str | Path = "background/tabletop_semantic_mask.png",
+    frame_index: int = 0,
+    hull: str = "convex-hull",
+    plane_distance_threshold_m: float = DEFAULT_PLANE_DISTANCE_THRESHOLD_M if "DEFAULT_PLANE_DISTANCE_THRESHOLD_M" in globals() else 0.02,
+    write: bool = False,
+) -> TabletopSemanticFitResult:
+    run = Path(run_dir)
+    bg_dir = run / "background"
+    qa_dir = run / "qa"
+    bg_dir.mkdir(parents=True, exist_ok=True)
+    qa_dir.mkdir(parents=True, exist_ok=True)
+    report_path = qa_dir / "tabletop_semantic_fit_report.json"
+    polygon_path = bg_dir / "table_polygon_world.json"
+    semantic_mask_path = bg_dir / "tabletop_semantic_mask.png"
+    refined_mask_path = bg_dir / "tabletop_mask.png"
+
+    camera = _load_json(run / "camera.json")
+    trajectory = _load_json(run / "trajectory.json")
+    frames = _select_trajectory_frames(trajectory, [int(frame_index)])
+    mask_src = _resolve_run_path(run, mask)
+    blocking_reasons: list[str] = []
+    if not mask_src.is_file():
+        blocking_reasons.append("tabletop_semantic_mask_missing")
+    if not frames:
+        blocking_reasons.append("trajectory_frame_missing")
+    k = _camera_matrix(camera)
+    if k is None:
+        blocking_reasons.append("camera_intrinsics_missing")
+    if hull not in {"convex-hull", "clipped-convex-hull", "rotated-rectangle"}:
+        blocking_reasons.append("unsupported_hull_method")
+
+    frame = frames[0] if frames else {}
+    t_camera_to_world = _transform(frame.get("T_camera_to_world")) if frame else None
+    if t_camera_to_world is None:
+        blocking_reasons.append("camera_extrinsics_missing")
+    depth_path = run / str(frame.get("depth_path", "")) if frame else run / "<missing-depth>"
+    confidence_path = run / str(frame.get("confidence_path", "")) if frame else run / "<missing-confidence>"
+    if not depth_path.is_file():
+        blocking_reasons.append("depth_frame_missing")
+    if not confidence_path.is_file():
+        blocking_reasons.append("confidence_frame_missing")
+
+    if blocking_reasons:
+        report = _semantic_fit_blocked_report(run, blocking_reasons, mask_src, frame_index, hull)
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        return TabletopSemanticFitResult(polygon_path, semantic_mask_path, refined_mask_path, report_path, report)
+
+    semantic_mask = cv2.imread(str(mask_src), cv2.IMREAD_GRAYSCALE)
+    depth = np.load(depth_path)
+    confidence = np.asarray(Image.open(confidence_path).convert("L"))
+    if semantic_mask is None or depth.ndim != 2 or semantic_mask.shape != depth.shape or confidence.shape != depth.shape:
+        reasons = []
+        if semantic_mask is None:
+            reasons.append("tabletop_semantic_mask_unreadable")
+        if depth.ndim != 2:
+            reasons.append("depth_frame_not_2d")
+        if semantic_mask is not None and semantic_mask.shape != depth.shape:
+            reasons.append("semantic_mask_depth_shape_mismatch")
+        if confidence.shape != depth.shape:
+            reasons.append("confidence_depth_shape_mismatch")
+        report = _semantic_fit_blocked_report(run, reasons, mask_src, frame_index, hull)
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        return TabletopSemanticFitResult(polygon_path, semantic_mask_path, refined_mask_path, report_path, report)
+
+    semantic_binary = semantic_mask > 0
+    valid = semantic_binary & np.isfinite(depth) & (depth > 0.0) & (confidence > 0)
+    points_world, rows, cols = _backproject_selected_depth(depth, valid, k, t_camera_to_world)
+    if points_world.shape[0] < 3:
+        report = _semantic_fit_blocked_report(run, ["insufficient_semantic_depth_points"], mask_src, frame_index, hull)
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        return TabletopSemanticFitResult(polygon_path, semantic_mask_path, refined_mask_path, report_path, report)
+
+    plane = _fit_plane_ransac_points(points_world, distance_threshold_m=float(plane_distance_threshold_m))
+    if plane is None:
+        report = _semantic_fit_blocked_report(run, ["semantic_depth_plane_ransac_failed"], mask_src, frame_index, hull)
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        return TabletopSemanticFitResult(polygon_path, semantic_mask_path, refined_mask_path, report_path, report)
+    normal, offset, inliers = plane
+    if int(np.count_nonzero(inliers)) < 3:
+        report = _semantic_fit_blocked_report(run, ["insufficient_near_plane_semantic_points"], mask_src, frame_index, hull)
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        return TabletopSemanticFitResult(polygon_path, semantic_mask_path, refined_mask_path, report_path, report)
+
+    near_points = points_world[inliers]
+    near_rows = rows[inliers]
+    near_cols = cols[inliers]
+    polygon_xy = _tabletop_hull_xy(near_points[:, :2], method=hull)
+    if polygon_xy is None:
+        report = _semantic_fit_blocked_report(run, ["semantic_depth_polygon_hull_failed"], mask_src, frame_index, hull)
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        return TabletopSemanticFitResult(polygon_path, semantic_mask_path, refined_mask_path, report_path, report)
+
+    refined_mask = np.zeros(depth.shape, dtype=np.uint8)
+    refined_mask[near_rows, near_cols] = 255
+    top_z = float(np.median(near_points[:, 2]))
+    residuals = np.abs(points_world @ normal + offset)
+    inlier_residuals = residuals[inliers]
+    extent = np.max(polygon_xy, axis=0) - np.min(polygon_xy, axis=0)
+    polygon = {
+        "version": 1,
+        "status": "passed",
+        "source_backend": SEMANTIC_TABLE_COLLISION_SOURCE,
+        "semantic_source_backend": "tabletop_semantic_mask",
+        "geometry_type": f"{hull}_from_semantic_masked_depth_plane",
+        "coordinate_world": "sim_world",
+        "coordinate_frame": "sim_world",
+        "unit": "meter",
+        "polygon_world_xy": [[float(x), float(y)] for x, y in polygon_xy.tolist()],
+        "polygons_world_xy": [[[float(x), float(y)] for x, y in polygon_xy.tolist()]],
+        "polygon_count": 1,
+        "top_z_m": top_z,
+        "support_height_m": top_z,
+        "semantic_mask_path": "background/tabletop_semantic_mask.png",
+        "refined_plane_mask_path": "background/tabletop_mask.png",
+        "plane_world": {
+            "normal": [float(v) for v in normal.tolist()],
+            "offset_m": float(offset),
+            "equation": "normal dot X + offset = 0",
+        },
+        "polygon_extent_x_m": float(extent[0]),
+        "polygon_extent_y_m": float(extent[1]),
+        "input_semantic_depth_point_count": int(points_world.shape[0]),
+        "near_plane_point_count": int(np.count_nonzero(inliers)),
+    }
+    report = {
+        "version": 1,
+        "status": "passed",
+        "source_backend": SEMANTIC_TABLE_COLLISION_SOURCE,
+        "frame_index": int(frame_index),
+        "frame_id": frame.get("frame_id"),
+        "hull_method": hull,
+        "semantic_mask_path": "background/tabletop_semantic_mask.png",
+        "refined_plane_mask_path": "background/tabletop_mask.png",
+        "polygon_path": "background/table_polygon_world.json",
+        "depth_path": _rel(run, depth_path),
+        "confidence_path": _rel(run, confidence_path),
+        "metrics": {
+            "semantic_mask_area_px": int(np.count_nonzero(semantic_binary)),
+            "masked_depth_point_count": int(points_world.shape[0]),
+            "near_plane_mask_area_px": int(np.count_nonzero(refined_mask)),
+            "plane_inlier_count": int(np.count_nonzero(inliers)),
+            "plane_inlier_ratio": float(np.count_nonzero(inliers) / max(1, points_world.shape[0])),
+            "plane_distance_threshold_m": float(plane_distance_threshold_m),
+            "plane_residual_median_m": float(np.median(inlier_residuals)),
+            "plane_residual_p90_m": float(np.percentile(inlier_residuals, 90.0)),
+            "top_z_m": top_z,
+        },
+        "claim_boundary": {
+            "semantic_tabletop_localization": "provided_by_mask_not_inferred_from_3dgs",
+            "metric_geometry": "phone_depth_confidence_and_explicit_camera_pose",
+            "not_collision_source": ["3dgs_splat_centers", "bbox_proxy", "full_scene_largest_plane"],
+        },
+        "blocking_reasons": [],
+    }
+    if write:
+        if mask_src.resolve() != semantic_mask_path.resolve():
+            shutil.copyfile(mask_src, semantic_mask_path)
+        else:
+            Image.fromarray(semantic_mask.astype(np.uint8)).save(semantic_mask_path)
+        Image.fromarray(refined_mask).save(refined_mask_path)
+        polygon_path.write_text(json.dumps(polygon, indent=2), encoding="utf-8")
+    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    return TabletopSemanticFitResult(polygon_path, semantic_mask_path, refined_mask_path, report_path, report)
 
 
 def build_table_collision(
@@ -230,6 +489,8 @@ def qa_bg_table(
             "usd_path": "table/collision_polygon_slab.usd" if (run / "table" / "collision_polygon_slab.usd").is_file() else None,
             "projection_iou": projection.get("tabletop_iou"),
             "tabletop_iou": projection.get("tabletop_iou"),
+            "projection_mask_source": projection.get("projection_mask_source"),
+            "projection_mask_path": projection.get("projection_mask_path"),
             "visible_iou": projection.get("visible_iou"),
             "overreach_ratio": projection.get("overreach_ratio"),
             "undercoverage_ratio": projection.get("undercoverage_ratio"),
@@ -269,8 +530,8 @@ def _table_polygon_contract(polygon: dict[str, Any]) -> dict[str, Any]:
     coordinate_world = polygon.get("coordinate_world")
     coordinate_frame = polygon.get("coordinate_frame")
     unit = polygon.get("unit")
-    if source_backend != TABLE_COLLISION_SOURCE:
-        reasons.append("table_polygon_source_backend_not_arkit_depth_ransac_plane")
+    if source_backend not in ALLOWED_TABLE_COLLISION_SOURCES:
+        reasons.append("table_polygon_source_backend_not_supported")
     if coordinate_world != "sim_world":
         reasons.append("table_polygon_coordinate_world_not_sim_world")
     if coordinate_frame != "sim_world":
@@ -466,11 +727,18 @@ def _normalize_render_frames(run: Path, value: Any, frame_indices: list[int]) ->
 
 def _table_projection_metrics(run: Path, polygon: dict[str, Any], camera: dict[str, Any]) -> dict[str, Any]:
     reasons: list[str] = []
-    mask_path = run / "background" / "tabletop_mask.png"
+    semantic_mask_path = run / "background" / "tabletop_semantic_mask.png"
+    fallback_mask_path = run / "background" / "tabletop_mask.png"
+    if semantic_mask_path.is_file():
+        mask_path = semantic_mask_path
+        mask_source = "semantic_tabletop_mask"
+    else:
+        mask_path = fallback_mask_path
+        mask_source = "refined_or_legacy_tabletop_mask"
     mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE) if mask_path.is_file() else None
     if mask is None:
         reasons.append("tabletop_mask_missing_or_unreadable")
-        return {"blocking_reasons": reasons}
+        return {"blocking_reasons": reasons, "projection_mask_source": mask_source, "projection_mask_path": _rel(run, mask_path)}
     k = _camera_matrix(camera)
     if k is None:
         reasons.append("camera_intrinsics_missing")
@@ -526,6 +794,8 @@ def _table_projection_metrics(run: Path, polygon: dict[str, Any], camera: dict[s
         "raw_tabletop_iou": raw_tabletop_iou,
         "raw_overreach_ratio": raw_overreach,
         "overlay_path": _rel(run, overlay_path),
+        "projection_mask_source": mask_source,
+        "projection_mask_path": _rel(run, mask_path),
     }
 
 
@@ -776,6 +1046,93 @@ def _splat_center_diagnostic(run: Path, polygon: dict[str, Any], t_3dgs_world_to
         "source": "splat_centers_diagnostic_only_not_collision_source",
         "collision_geometry_source": "not_used",
     }
+
+
+def _semantic_fit_blocked_report(run: Path, reasons: list[str], mask_path: Path, frame_index: int, hull: str) -> dict[str, Any]:
+    return {
+        "version": 1,
+        "status": "blocked",
+        "source_backend": SEMANTIC_TABLE_COLLISION_SOURCE,
+        "frame_index": int(frame_index),
+        "hull_method": hull,
+        "semantic_mask_path": _rel(run, mask_path),
+        "refined_plane_mask_path": None,
+        "polygon_path": None,
+        "blocking_reasons": _dedupe(reasons),
+        "claim_boundary": {
+            "semantic_tabletop_localization": "blocked_without_masked_depth_plane",
+            "metric_geometry": "blocked_without_phone_depth_confidence_and_pose",
+        },
+    }
+
+
+def _backproject_selected_depth(
+    depth: np.ndarray,
+    selected: np.ndarray,
+    k: np.ndarray,
+    t_camera_to_world: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    rows, cols = np.where(selected)
+    if rows.size == 0:
+        return np.empty((0, 3), dtype=np.float64), rows, cols
+    z = depth[rows, cols].astype(np.float64)
+    x = (cols.astype(np.float64) - float(k[0, 2])) * z / float(k[0, 0])
+    y = (rows.astype(np.float64) - float(k[1, 2])) * z / float(k[1, 1])
+    points_camera = np.column_stack([x, y, z, np.ones_like(z)])
+    points_world = (t_camera_to_world @ points_camera.T).T[:, :3]
+    finite = np.all(np.isfinite(points_world), axis=1)
+    return points_world[finite], rows[finite], cols[finite]
+
+
+def _fit_plane_ransac_points(points: np.ndarray, *, distance_threshold_m: float) -> tuple[np.ndarray, float, np.ndarray] | None:
+    if points.shape[0] < 3:
+        return None
+    rng = np.random.default_rng(23)
+    iterations = min(512, max(128, points.shape[0] // 16))
+    best_inliers: np.ndarray | None = None
+    best_count = -1
+    for _ in range(iterations):
+        sample = points[rng.choice(points.shape[0], size=3, replace=False)]
+        normal = np.cross(sample[1] - sample[0], sample[2] - sample[0])
+        norm = float(np.linalg.norm(normal))
+        if norm < 1e-9:
+            continue
+        normal /= norm
+        offset = -float(normal @ sample[0])
+        distances = np.abs(points @ normal + offset)
+        inliers = distances <= float(distance_threshold_m)
+        count = int(np.count_nonzero(inliers))
+        if count > best_count:
+            best_count = count
+            best_inliers = inliers
+    if best_inliers is None or int(np.count_nonzero(best_inliers)) < 3:
+        return None
+    inlier_points = points[best_inliers]
+    centroid = np.mean(inlier_points, axis=0)
+    _, _, vh = np.linalg.svd(inlier_points - centroid, full_matrices=False)
+    normal = vh[-1]
+    normal /= max(float(np.linalg.norm(normal)), 1e-12)
+    if normal[2] < 0.0:
+        normal = -normal
+    offset = -float(normal @ centroid)
+    distances = np.abs(points @ normal + offset)
+    inliers = distances <= float(distance_threshold_m)
+    return normal, offset, inliers
+
+
+def _tabletop_hull_xy(points_xy: np.ndarray, *, method: str) -> np.ndarray | None:
+    if points_xy.ndim != 2 or points_xy.shape[1] != 2 or points_xy.shape[0] < 3:
+        return None
+    finite = np.all(np.isfinite(points_xy), axis=1)
+    points = points_xy[finite].astype(np.float32)
+    if points.shape[0] < 3:
+        return None
+    if method == "rotated-rectangle":
+        rect = cv2.minAreaRect(points)
+        box = cv2.boxPoints(rect).astype(np.float64)
+        return box if box.shape[0] >= 3 else None
+    hull = cv2.convexHull(points).reshape(-1, 2).astype(np.float64)
+    return hull if hull.shape[0] >= 3 else None
 
 
 def _validate_world_units(polygon: dict[str, Any]) -> None:
