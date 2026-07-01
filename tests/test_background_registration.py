@@ -168,7 +168,16 @@ def test_register_3dgs_known_phone_sim_world_allows_identity_with_evidence(tmp_p
     (run / "background" / "3dgs_native").mkdir(parents=True)
     (run / "background" / "3dgs_native" / "splat_rgb.ply").write_text("ply\n", encoding="utf-8")
     (run / "video").mkdir()
-    (run / "video" / "3dgs_status.json").write_text(json.dumps({"status": "completed"}), encoding="utf-8")
+    (run / "video" / "3dgs_status.json").write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "inputs": {"pose_world": "sim"},
+                "claim": {"identity_transform_allowed": True},
+            }
+        ),
+        encoding="utf-8",
+    )
     (run / "video" / "nerfstudio_phone").mkdir(parents=True)
     (run / "video" / "nerfstudio_phone" / "transforms.json").write_text(
         json.dumps(
@@ -196,6 +205,48 @@ def test_register_3dgs_known_phone_sim_world_allows_identity_with_evidence(tmp_p
     assert result.data["transform_sources"]["T_3dgs_world_to_sim_world"] == "identity_allowed_by_phone_sim_world_training"
     assert result.data["evidence"]["phone_capture_pose_world"] == "sim"
     assert result.data["evidence"]["transforms_path"] == "video/nerfstudio_phone/transforms.json"
+
+
+def test_register_3dgs_known_phone_sim_world_blocks_identity_when_training_used_arkit_poses(tmp_path):
+    from real2sim_scene_foundry.background_registration import register_3dgs_background
+
+    run = tmp_path / "run"
+    (run / "background" / "3dgs_native").mkdir(parents=True)
+    (run / "background" / "3dgs_native" / "splat_rgb.ply").write_text("ply\n", encoding="utf-8")
+    (run / "video" / "nerfstudio_phone").mkdir(parents=True)
+    (run / "video" / "3dgs_status.json").write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "inputs": {"pose_world": "arkit"},
+                "claim": {"identity_transform_allowed": False},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run / "video" / "nerfstudio_phone" / "transforms.json").write_text(
+        json.dumps(
+            {
+                "phone_capture": {
+                    "pose_world": "sim",
+                    "camera_pose_world": "sim",
+                    "identity_3dgs_to_sim_allowed_if_trained_with_pose_world": True,
+                    "intrinsics_source": "arkit_explicit",
+                    "extrinsics_source": "arkit_explicit",
+                    "scale_source": "arkit_sceneDepth_meters",
+                },
+                "frames": [{"file_path": "images/frame_000000.jpg", "transform_matrix": np.eye(4).tolist()}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = register_3dgs_background(run, method="known-phone-sim-world", write=True)
+
+    assert result.data["status"] == "blocked_identity_transform_without_phone_sim_world_evidence"
+    assert result.data["identity_allowed"] is False
+    assert "3dgs_training_pose_world_not_sim" in result.data["blocking_reasons"]
+    assert "3dgs_identity_training_claim_missing" in result.data["blocking_reasons"]
 
 
 def test_register_3dgs_known_phone_sim_world_blocks_identity_without_evidence(tmp_path):

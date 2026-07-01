@@ -15,6 +15,7 @@ from .defaults import SAM3D_PROCESS_URL, SAM3_SEGMENT_URL
 from .interactive import export_interactive_scene
 from .pipeline import run_extract, run_reconstruct_align, run_smoke_reconstruction
 from .phone_capture import export_nerfstudio_from_phone_capture, import_phone_capture, validate_phone_capture
+from .phone_sim_alignment import align_phone_sim_world
 from .pose_refinement import (
     apply_visual_orientation_overrides,
     qa_object_alignment,
@@ -245,6 +246,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"wrote {Path(args.run_dir) / 'capture_contract.json'}")
         print(f"status={report.get('status')}")
         return 0
+    if args.command == "align-phone-sim-world":
+        report = align_phone_sim_world(args.run_dir, force=args.force)
+        print(f"wrote {Path(args.run_dir) / 'background' / 'phone_sim_alignment.json'}")
+        print(f"status={report.get('status')}")
+        return 0
     if args.command == "import-record3d":
         report = convert_record3d_export(
             args.record3d_dir,
@@ -259,7 +265,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "export-nerfstudio-from-phone-capture":
         report = export_nerfstudio_from_phone_capture(args.run_dir, pose_world=args.pose_world)
-        print(f"wrote {Path(args.run_dir) / str(report.get('transforms_path', 'video/nerfstudio_phone/transforms.json'))}")
+        output_path = report.get("transforms_path") or "video/nerfstudio_phone/export_report.json"
+        print(f"wrote {Path(args.run_dir) / str(output_path)}")
         print(f"status={report.get('status')}")
         return 0
     if args.command == "export-manifest":
@@ -338,6 +345,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_video_scene_parser(subparsers, "video-scene")
     _add_validate_phone_capture_parser(subparsers)
     _add_import_phone_capture_parser(subparsers)
+    _add_align_phone_sim_world_parser(subparsers)
     _add_import_record3d_parser(subparsers)
     _add_export_nerfstudio_phone_parser(subparsers)
     _add_export_manifest_parser(subparsers)
@@ -501,6 +509,12 @@ def _add_import_phone_capture_parser(subparsers: argparse._SubParsersAction) -> 
     parser = subparsers.add_parser("import-phone-capture")
     parser.add_argument("--capture-dir", required=True, type=Path)
     parser.add_argument("--run-dir", required=True, type=Path)
+
+
+def _add_align_phone_sim_world_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser("align-phone-sim-world")
+    parser.add_argument("--run-dir", required=True, type=Path)
+    parser.add_argument("--force", action="store_true")
 
 
 def _add_import_record3d_parser(subparsers: argparse._SubParsersAction) -> None:

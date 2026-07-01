@@ -442,11 +442,17 @@ def _3dgs_transform_record(
 
 def _phone_sim_world_identity_evidence(run: Path) -> tuple[dict[str, Any], list[str]]:
     transforms_path = run / "video" / "nerfstudio_phone" / "transforms.json"
+    gs_status = _load_3dgs_status(run)
+    gs_inputs = gs_status.get("inputs", {}) if isinstance(gs_status.get("inputs"), dict) else {}
+    gs_claim = gs_status.get("claim", {}) if isinstance(gs_status.get("claim"), dict) else {}
     evidence: dict[str, Any] = {
         "transforms_path": str(transforms_path.relative_to(run)),
         "phone_capture_pose_world": None,
         "identity_allowed": False,
         "frame_count": 0,
+        "3dgs_training_status": gs_status.get("status"),
+        "3dgs_training_pose_world": gs_inputs.get("pose_world"),
+        "3dgs_identity_transform_allowed": bool(gs_claim.get("identity_transform_allowed")),
     }
     if not transforms_path.is_file():
         return evidence, ["missing_phone_sim_world_3dgs_training_evidence"]
@@ -477,6 +483,10 @@ def _phone_sim_world_identity_evidence(run: Path) -> tuple[dict[str, Any], list[
         reasons.append("phone_scale_not_arkit_sceneDepth_meters")
     if not frames:
         reasons.append("phone_nerfstudio_frames_missing")
+    if gs_inputs.get("pose_world") != "sim":
+        reasons.append("3dgs_training_pose_world_not_sim")
+    if gs_claim.get("identity_transform_allowed") is not True:
+        reasons.append("3dgs_identity_training_claim_missing")
     return evidence, reasons
 
 

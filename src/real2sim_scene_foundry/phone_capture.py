@@ -184,6 +184,23 @@ def export_nerfstudio_from_phone_capture(run_dir: str | Path, *, pose_world: str
     frames = trajectory.get("frames", []) if isinstance(trajectory.get("frames"), list) else []
     out_dir = run / "video" / "nerfstudio_phone"
     images_dir = out_dir / "images"
+    if pose_world == "sim" and not _has_phone_sim_alignment(run, camera, trajectory):
+        out_dir.mkdir(parents=True, exist_ok=True)
+        transforms_path = out_dir / "transforms.json"
+        if transforms_path.is_file():
+            transforms_path.unlink()
+        report = {
+            "version": 1,
+            "status": "blocked",
+            "pose_world": pose_world,
+            "camera_pose_world": pose_world,
+            "blocking_reasons": ["phone_sim_world_alignment_missing"],
+            "required_alignment_path": "background/phone_sim_alignment.json",
+            "transforms_path": None,
+            "image_count": 0,
+        }
+        (out_dir / "export_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+        return report
     images_dir.mkdir(parents=True, exist_ok=True)
     clean_dir = run / "clean_background" / "rgb"
     capture_root = _capture_root_from_contract(run)
@@ -230,6 +247,14 @@ def export_nerfstudio_from_phone_capture(run_dir: str | Path, *, pose_world: str
     }
     (out_dir / "export_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     return report
+
+
+def _has_phone_sim_alignment(run: Path, camera: dict[str, Any], trajectory: dict[str, Any]) -> bool:
+    if camera.get("pose_world") != "sim" or trajectory.get("pose_world") != "sim":
+        return False
+    alignment = _load_json(run / "background" / "phone_sim_alignment.json")
+    transform = _transform(alignment.get("T_arkit_world_to_sim_world"))
+    return alignment.get("status") == "passed" and transform is not None
 
 
 def _validation_report(capture: Path, reasons: list[str], **kwargs: Any) -> dict[str, Any]:

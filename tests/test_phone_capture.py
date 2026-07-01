@@ -5,11 +5,13 @@ import numpy as np
 from PIL import Image
 
 from real2sim_scene_foundry.cli import main
+from real2sim_scene_foundry.background_registration import register_3dgs_background
 from real2sim_scene_foundry.phone_capture import (
     export_nerfstudio_from_phone_capture,
     import_phone_capture,
     validate_phone_capture,
 )
+from real2sim_scene_foundry.phone_sim_alignment import align_phone_sim_world
 from real2sim_scene_foundry.support_plane import estimate_and_apply_support_plane
 from real2sim_scene_foundry.table_collision_qa import write_table_collision_projection_qa_v2
 
@@ -111,7 +113,7 @@ def test_import_phone_capture_writes_explicit_camera_and_trajectory(tmp_path):
     assert (run / "capture_contract.json").is_file()
 
 
-def test_export_nerfstudio_from_phone_capture_records_pose_world_and_clean_background(tmp_path):
+def test_export_nerfstudio_from_phone_capture_blocks_sim_world_without_alignment(tmp_path):
     capture = tmp_path / "capture"
     run = tmp_path / "run"
     _write_phone_bundle(capture)
@@ -119,14 +121,42 @@ def test_export_nerfstudio_from_phone_capture_records_pose_world_and_clean_backg
 
     report = export_nerfstudio_from_phone_capture(run, pose_world="sim")
 
+    assert report["status"] == "blocked"
+    assert "phone_sim_world_alignment_missing" in report["blocking_reasons"]
+    assert not (run / "video" / "nerfstudio_phone" / "transforms.json").is_file()
+
+
+def test_align_phone_sim_world_fits_depth_plane_exports_sim_poses_and_registers_3dgs(tmp_path):
+    capture = tmp_path / "capture"
+    run = tmp_path / "run"
+    _write_phone_bundle(capture, frame_count=4, baseline_m=0.15)
+    import_phone_capture(capture, run)
+    for depth_path in (run / "depth").glob("*.npy"):
+        np.save(depth_path, np.full((16, 16), 1.0, dtype=np.float32))
+    (run / "background" / "3dgs_native").mkdir(parents=True)
+    (run / "background" / "3dgs_native" / "splat_rgb.ply").write_text("ply\n", encoding="utf-8")
+    (run / "video").mkdir(exist_ok=True)
+    (run / "video" / "3dgs_status.json").write_text(json.dumps({"status": "completed"}), encoding="utf-8")
+
+    alignment = align_phone_sim_world(run, force=True)
+    export_report = export_nerfstudio_from_phone_capture(run, pose_world="sim")
+    registration = register_3dgs_background(run, method="camera-sim3", write=True)
+
+    trajectory = json.loads((run / "trajectory.json").read_text(encoding="utf-8"))
     transforms = json.loads((run / "video" / "nerfstudio_phone" / "transforms.json").read_text(encoding="utf-8"))
-    assert report["status"] == "exported"
-    assert report["pose_world"] == "sim"
-    assert report["used_clean_background"] is True
+    table_polygon = json.loads((run / "background" / "table_polygon_world.json").read_text(encoding="utf-8"))
+    t_arkit_to_sim = np.asarray(alignment["T_arkit_world_to_sim_world"], dtype=float)
+    assert alignment["status"] == "passed"
+    assert alignment["source_backend"] == "arkit_depth_ransac_plane"
+    assert trajectory["pose_world"] == "sim"
+    assert export_report["status"] == "exported"
     assert transforms["phone_capture"]["pose_world"] == "sim"
-    assert transforms["phone_capture"]["camera_pose_world"] == "sim"
-    assert transforms["frames"][0]["file_path"].endswith("images/frame_000000.jpg")
-    assert transforms["frames"][0]["transform_matrix"] == IDENTITY
+    assert transforms["phone_capture"]["identity_3dgs_to_sim_allowed_if_trained_with_pose_world"] is True
+    assert registration.data["status"] == "registered"
+    assert registration.data["method"] == "camera-sim3"
+    assert np.allclose(np.asarray(registration.data["T_3dgs_world_to_sim_world"], dtype=float), t_arkit_to_sim)
+    assert table_polygon["source_backend"] == "arkit_depth_ransac_plane"
+    assert max(abs(point[2]) for point in alignment["qa_samples_sim_xyz"]) < 1e-5
 
 
 def test_phone_capture_cli_commands(tmp_path):
