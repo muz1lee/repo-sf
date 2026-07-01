@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import cv2
 import numpy as np
 import trimesh
 from PIL import Image
@@ -286,7 +287,8 @@ def _write_rgbd_pose_report(run: Path, item: dict[str, Any], support: dict[str, 
     support_gap_abs = abs(float(clearance)) if clearance is not None else None
     penetration_depth = max(0.0, -float(clearance)) if clearance is not None else None
     metrics = {
-        "mask_iou_ref": None,
+        "silhouette_mask_iou": None,
+        "projected_bbox_iou": None,
         "bbox_error_px": None,
         "depth_median_abs_m": None,
         "depth_p90_abs_m": None,
@@ -296,6 +298,8 @@ def _write_rgbd_pose_report(run: Path, item: dict[str, Any], support: dict[str, 
     }
     camera_source = _rgbd_camera_source(run)
     scale_source = str(item.get("scale_source") or item.get("pose_refinement", {}).get("scale_source") or "rgbd_alignment_unverified")
+    phone_metrics = _phone_rgbd_alignment_metrics(run, item)
+    metrics.update(phone_metrics.get("metrics", {}))
     report = {
         "version": 1,
         "object_id": object_id,
@@ -308,6 +312,7 @@ def _write_rgbd_pose_report(run: Path, item: dict[str, Any], support: dict[str, 
         "camera_source": camera_source,
         "scale_source": scale_source,
         "metrics": metrics,
+        "metric_sources": phone_metrics.get("sources", {}),
         "support_alignment": support_alignment,
         "blocking_reasons": _rgbd_missing_metric_reasons(metrics, camera_source, scale_source),
         "T_object_to_camera": item.get("T_object_to_camera"),
@@ -316,10 +321,215 @@ def _write_rgbd_pose_report(run: Path, item: dict[str, Any], support: dict[str, 
     status, reasons = _evaluate_object_alignment_report(report)
     report["status"] = "accepted" if status == "passed" else "blocked"
     report["blocking_reasons"] = reasons
-    Image.new("RGB", (2, 2), color=(0, 0, 0)).save(object_dir / "pose_overlay_ref_frame.png")
-    Image.new("RGB", (2, 2), color=(0, 0, 0)).save(object_dir / "depth_residual_ref_frame.png")
+    overlay = phone_metrics.get("overlay_rgb")
+    if isinstance(overlay, np.ndarray):
+        Image.fromarray(overlay.astype(np.uint8)).save(object_dir / "pose_overlay_ref_frame.png")
+    else:
+        Image.new("RGB", (2, 2), color=(0, 0, 0)).save(object_dir / "pose_overlay_ref_frame.png")
+    residual_vis = phone_metrics.get("depth_residual_rgb")
+    if isinstance(residual_vis, np.ndarray):
+        Image.fromarray(residual_vis.astype(np.uint8)).save(object_dir / "depth_residual_ref_frame.png")
+    else:
+        Image.new("RGB", (2, 2), color=(0, 0, 0)).save(object_dir / "depth_residual_ref_frame.png")
     _write_object_report(object_dir, report)
     return report
+
+
+def _phone_rgbd_alignment_metrics(run: Path, item: dict[str, Any]) -> dict[str, Any]:
+    camera = _load_json(run / "camera.json")
+    trajectory = _load_json(run / "trajectory.json")
+    if (
+        camera.get("intrinsics_source") != "arkit_explicit"
+        or camera.get("extrinsics_source") != "arkit_explicit"
+        or camera.get("scale_source") != "arkit_sceneDepth_meters"
+    ):
+        return {"metrics": {}, "sources": {"status": "unavailable", "reason": "phone_rgbd_evidence_missing"}}
+    frame = _first_rgbd_frame(run, trajectory)
+    k = _camera_matrix(camera)
+    t_world_to_camera = _world_to_camera_transform(camera)
+    mask = _read_binary_mask(run / str(item.get("mask_path", "")))
+    visual_path = _visual_geometry_path(run, item)
+    if frame is None or k is None or t_world_to_camera is None or mask is None or visual_path is None:
+        return {"metrics": {}, "sources": {"status": "unavailable", "reason": "phone_rgbd_inputs_incomplete"}}
+
+    depth = np.load(run / frame["depth_path"])
+    confidence = np.asarray(Image.open(run / frame["confidence_path"]).convert("L"))
+    if depth.ndim != 2 or confidence.shape != depth.shape or mask.shape != depth.shape:
+        return {"metrics": {}, "sources": {"status": "blocked", "reason": "phone_rgbd_shape_mismatch"}}
+
+    vertices = _mesh_vertices(visual_path) * _asset_scale(item)
+    transform = _transform_array(item["T_object_to_world"])
+    homogeneous = np.concatenate([vertices, np.ones((vertices.shape[0], 1), dtype=np.float64)], axis=1)
+    vertices_world = (transform @ homogeneous.T).T
+    vertices_camera = (t_world_to_camera @ vertices_world.T).T[:, :3]
+    projected = _project_camera_points(vertices_camera, k)
+    if projected is None or projected.shape[0] < 3:
+        return {"metrics": {}, "sources": {"status": "blocked", "reason": "mesh_projection_invalid"}}
+
+    silhouette = np.zeros(depth.shape, dtype=np.uint8)
+    hull = cv2.convexHull(projected.astype(np.float32)).reshape(-1, 2)
+    cv2.fillConvexPoly(silhouette, np.rint(hull).astype(np.int32), 255)
+    silhouette_mask = silhouette > 0
+    object_mask = mask > 0
+    overlap = silhouette_mask & object_mask & (confidence > 0) & np.isfinite(depth) & (depth > 0.0)
+    depth_values = None
+    if np.any(overlap):
+        predicted_depth = float(np.percentile(vertices_camera[vertices_camera[:, 2] > 1e-6, 2], 5.0))
+        depth_values = np.abs(depth[overlap].astype(np.float64) - predicted_depth)
+
+    silhouette_iou = _binary_iou(silhouette_mask, object_mask)
+    projected_bbox = _bbox_from_binary_mask(silhouette_mask)
+    mask_bbox = _bbox_from_binary_mask(object_mask)
+    projected_bbox_iou = _bbox_iou_xyxy(projected_bbox, mask_bbox)
+    projected_center = _mask_center(silhouette_mask)
+    mask_center = _mask_center(object_mask)
+    center_error = (
+        float(np.linalg.norm(np.asarray(projected_center, dtype=np.float64) - np.asarray(mask_center, dtype=np.float64)))
+        if projected_center is not None and mask_center is not None
+        else None
+    )
+    bbox_error = _bbox_corner_error(projected_bbox, mask_bbox)
+
+    overlay = np.zeros((*depth.shape, 3), dtype=np.uint8)
+    overlay[..., 1] = object_mask.astype(np.uint8) * 255
+    overlay[..., 2] = silhouette_mask.astype(np.uint8) * 255
+    overlay[object_mask & silhouette_mask] = [255, 255, 255]
+    residual_vis = np.zeros((*depth.shape, 3), dtype=np.uint8)
+    if depth_values is not None:
+        residual = np.zeros(depth.shape, dtype=np.float64)
+        residual[overlap] = np.clip(depth_values / 0.08, 0.0, 1.0)
+        residual_vis[..., 0] = (residual * 255).astype(np.uint8)
+        residual_vis[..., 1] = ((1.0 - residual) * overlap * 255).astype(np.uint8)
+
+    return {
+        "metrics": {
+            "silhouette_mask_iou": silhouette_iou,
+            "projected_bbox_iou": projected_bbox_iou,
+            "bbox_error_px": bbox_error,
+            "depth_median_abs_m": float(np.median(depth_values)) if depth_values is not None and depth_values.size else None,
+            "depth_p90_abs_m": float(np.percentile(depth_values, 90.0)) if depth_values is not None and depth_values.size else None,
+            "projected_center_error_px": center_error,
+        },
+        "sources": {
+            "status": "computed",
+            "frame_id": frame["frame_id"],
+            "depth_path": frame["depth_path"],
+            "confidence_path": frame["confidence_path"],
+            "silhouette_source": "mesh_convex_hull_projection_not_bbox",
+            "depth_source": "phone_capture_depth_confidence",
+            "intrinsics_source": camera.get("intrinsics_source"),
+            "extrinsics_source": camera.get("extrinsics_source"),
+            "scale_source": camera.get("scale_source"),
+        },
+        "overlay_rgb": overlay,
+        "depth_residual_rgb": residual_vis,
+    }
+
+
+def _first_rgbd_frame(run: Path, trajectory: dict[str, Any]) -> dict[str, str] | None:
+    frames = trajectory.get("frames", [])
+    if not isinstance(frames, list):
+        return None
+    for frame in frames:
+        if not isinstance(frame, dict):
+            continue
+        depth_path = str(frame.get("depth_path", ""))
+        confidence_path = str(frame.get("confidence_path", ""))
+        if depth_path and confidence_path and (run / depth_path).is_file() and (run / confidence_path).is_file():
+            return {"frame_id": str(frame.get("frame_id") or Path(depth_path).stem), "depth_path": depth_path, "confidence_path": confidence_path}
+    return None
+
+
+def _camera_matrix(camera: dict[str, Any]) -> np.ndarray | None:
+    try:
+        if camera.get("K") is not None:
+            k = np.asarray(camera["K"], dtype=np.float64)
+            return k if k.shape == (3, 3) and np.all(np.isfinite(k)) else None
+        return np.asarray(
+            [[float(camera["fx"]), 0.0, float(camera["cx"])], [0.0, float(camera["fy"]), float(camera["cy"])], [0.0, 0.0, 1.0]],
+            dtype=np.float64,
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _world_to_camera_transform(camera: dict[str, Any]) -> np.ndarray | None:
+    if camera.get("T_world_to_camera") is not None:
+        transform = np.asarray(camera["T_world_to_camera"], dtype=np.float64)
+        return transform if transform.shape == (4, 4) and np.all(np.isfinite(transform)) else None
+    if camera.get("T_camera_to_world") is None:
+        return None
+    transform = np.asarray(camera["T_camera_to_world"], dtype=np.float64)
+    if transform.shape != (4, 4) or not np.all(np.isfinite(transform)):
+        return None
+    try:
+        return np.linalg.inv(transform)
+    except np.linalg.LinAlgError:
+        return None
+
+
+def _read_binary_mask(path: Path) -> np.ndarray | None:
+    if not path.is_file():
+        return None
+    try:
+        return np.asarray(Image.open(path).convert("L")) > 0
+    except Exception:  # noqa: BLE001 - corrupted masks make the metric unavailable.
+        return None
+
+
+def _project_camera_points(points_camera: np.ndarray, k: np.ndarray) -> np.ndarray | None:
+    valid = np.isfinite(points_camera).all(axis=1) & (points_camera[:, 2] > 1e-6)
+    if np.count_nonzero(valid) < 3:
+        return None
+    points = points_camera[valid]
+    pixels_h = (k @ points.T).T
+    pixels = pixels_h[:, :2] / pixels_h[:, 2:3]
+    finite = np.isfinite(pixels).all(axis=1)
+    pixels = pixels[finite]
+    return pixels if pixels.shape[0] >= 3 else None
+
+
+def _binary_iou(a: np.ndarray, b: np.ndarray) -> float | None:
+    if a.shape != b.shape:
+        return None
+    union = np.logical_or(a, b)
+    if not np.any(union):
+        return None
+    return float(np.logical_and(a, b).sum() / union.sum())
+
+
+def _bbox_from_binary_mask(mask: np.ndarray) -> list[float] | None:
+    rows, cols = np.where(mask)
+    if len(rows) == 0 or len(cols) == 0:
+        return None
+    return [float(cols.min()), float(rows.min()), float(cols.max()), float(rows.max())]
+
+
+def _bbox_iou_xyxy(a: list[float] | None, b: list[float] | None) -> float | None:
+    if a is None or b is None:
+        return None
+    x0 = max(a[0], b[0])
+    y0 = max(a[1], b[1])
+    x1 = min(a[2], b[2])
+    y1 = min(a[3], b[3])
+    intersection = max(0.0, x1 - x0 + 1.0) * max(0.0, y1 - y0 + 1.0)
+    area_a = max(0.0, a[2] - a[0] + 1.0) * max(0.0, a[3] - a[1] + 1.0)
+    area_b = max(0.0, b[2] - b[0] + 1.0) * max(0.0, b[3] - b[1] + 1.0)
+    union = area_a + area_b - intersection
+    return float(intersection / union) if union > 0.0 else None
+
+
+def _bbox_corner_error(a: list[float] | None, b: list[float] | None) -> float | None:
+    if a is None or b is None:
+        return None
+    return float(np.linalg.norm(np.asarray(a, dtype=np.float64) - np.asarray(b, dtype=np.float64)))
+
+
+def _mask_center(mask: np.ndarray) -> tuple[float, float] | None:
+    rows, cols = np.where(mask)
+    if len(rows) == 0 or len(cols) == 0:
+        return None
+    return float(cols.mean()), float(rows.mean())
 
 
 def _rgbd_camera_source(run: Path) -> str:
@@ -331,7 +541,7 @@ def _rgbd_camera_source(run: Path) -> str:
 
 def _object_alignment_thresholds() -> dict[str, float]:
     return {
-        "mask_iou_ref": 0.65,
+        "silhouette_mask_iou": 0.65,
         "depth_median_abs_m": 0.03,
         "depth_p90_abs_m": 0.08,
         "support_gap_abs_m": 0.005,
@@ -347,7 +557,7 @@ def _evaluate_object_alignment_report(report: dict[str, Any]) -> tuple[str, list
     reasons = list(report.get("blocking_reasons", []))
     thresholds = _object_alignment_thresholds()
     checks = [
-        ("mask_iou_ref", "mask_iou_below_threshold", lambda value, threshold: value >= threshold),
+        ("silhouette_mask_iou", "silhouette_mask_iou_below_threshold", lambda value, threshold: value >= threshold),
         ("depth_median_abs_m", "depth_median_residual_too_high", lambda value, threshold: value <= threshold),
         ("depth_p90_abs_m", "depth_p90_residual_too_high", lambda value, threshold: value <= threshold),
         ("support_gap_abs_m", "support_gap_too_large", lambda value, threshold: value <= threshold),

@@ -5,6 +5,7 @@ import pytest
 import trimesh
 from PIL import Image
 
+from real2sim_scene_foundry.phone_capture import import_phone_capture
 from real2sim_scene_foundry.pose_refinement import (
     apply_visual_orientation_overrides,
     qa_object_alignment,
@@ -128,6 +129,41 @@ def _write_pose_refinement_run(run_dir):
     (run_dir / "scene_manifest.json").write_text(json.dumps(scene, indent=2), encoding="utf-8")
 
 
+def _write_phone_rgbd_bundle(root):
+    width = 16
+    height = 16
+    (root / "rgb").mkdir(parents=True)
+    (root / "depth").mkdir()
+    (root / "confidence").mkdir()
+    (root / "camera").mkdir()
+    poses = []
+    for idx, tx in enumerate([0.0, 0.06, 0.12]):
+        stem = f"frame_{idx:06d}"
+        Image.new("RGB", (width, height), color=(60, 70, 80)).save(root / "rgb" / f"{stem}.jpg")
+        depth = np.full((height, width), 1.0, dtype=np.float32)
+        depth[3:13, 3:13] = 0.95
+        np.save(root / "depth" / f"{stem}.npy", depth)
+        Image.fromarray(np.full((height, width), 2, dtype=np.uint8)).save(root / "confidence" / f"{stem}.png")
+        transform = np.eye(4, dtype=float)
+        transform[0, 3] = tx
+        poses.append(
+            {
+                "frame_id": stem,
+                "rgb_path": f"rgb/{stem}.jpg",
+                "depth_path": f"depth/{stem}.npy",
+                "confidence_path": f"confidence/{stem}.png",
+                "T_camera_to_world": transform.tolist(),
+                "tracking_state": "normal",
+            }
+        )
+    (root / "camera" / "intrinsics.json").write_text(
+        json.dumps({"width": width, "height": height, "fx": 80.0, "fy": 80.0, "cx": 7.5, "cy": 7.5}),
+        encoding="utf-8",
+    )
+    (root / "camera" / "poses.json").write_text(json.dumps({"coordinate_frame": "arkit_world", "poses": poses}), encoding="utf-8")
+    (root / "metadata.json").write_text(json.dumps({"capture_kind": "phone_capture_bundle", "depth_unit": "meter"}), encoding="utf-8")
+
+
 def _mesh_counts(path):
     loaded = trimesh.load(path, force="scene")
     if isinstance(loaded, trimesh.Trimesh):
@@ -224,13 +260,60 @@ def test_refine_pose_rgbd_writes_fail_closed_object_alignment_reports(tmp_path):
     obj_report = json.loads((run_dir / "objects" / "cup" / "pose_refinement_report.json").read_text(encoding="utf-8"))
     assert obj_report["source"] == "rgbd_refined_from_auto"
     assert obj_report["operation"] == "rgbd_mask_mesh_pose_verification"
-    assert obj_report["metrics"]["mask_iou_ref"] is None
+    assert obj_report["metrics"]["silhouette_mask_iou"] is None
     assert obj_report["metrics"]["depth_median_abs_m"] is None
     assert obj_report["metrics"]["support_gap_abs_m"] == pytest.approx(0.14)
     assert obj_report["camera_source"] == "fallback"
-    assert "mask_iou_ref_unavailable" in obj_report["blocking_reasons"]
+    assert "silhouette_mask_iou_unavailable" in obj_report["blocking_reasons"]
     assert (run_dir / "objects" / "cup" / "pose_overlay_ref_frame.png").is_file()
     assert (run_dir / "objects" / "cup" / "depth_residual_ref_frame.png").is_file()
+
+
+def test_refine_pose_rgbd_uses_phone_depth_confidence_and_silhouette_metrics(tmp_path):
+    capture = tmp_path / "capture"
+    run_dir = tmp_path / "run"
+    _write_phone_rgbd_bundle(capture)
+    import_phone_capture(capture, run_dir)
+    object_dir = run_dir / "objects" / "cup"
+    object_dir.mkdir(parents=True, exist_ok=True)
+    trimesh.creation.box(extents=(0.1, 0.1, 0.1)).export(object_dir / "visual.glb")
+    mask = np.zeros((16, 16), dtype=np.uint8)
+    mask[3:13, 3:13] = 255
+    Image.fromarray(mask).save(object_dir / "mask.png")
+    (object_dir / "crop.png").write_bytes(b"")
+    scene = {
+        "version": 1,
+        "support_plane": {"status": "estimated", "height_world_m": 0.95, "table_top_z_m": 0.95},
+        "objects": [
+            {
+                "object_id": "cup",
+                "label": "cup",
+                "mesh_path": "objects/cup/visual.glb",
+                "mask_path": "objects/cup/mask.png",
+                "crop_path": "objects/cup/crop.png",
+                "T_object_to_world": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 1.0], [0, 0, 0, 1]],
+                "T_object_to_camera": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 1.0], [0, 0, 0, 1]],
+                "scale_m": 0.1,
+                "scale_source": "arkit_depth_metric",
+                "mass_kg": 0.2,
+                "friction": 0.8,
+            }
+        ],
+    }
+    (run_dir / "scene_manifest.json").write_text(json.dumps(scene, indent=2), encoding="utf-8")
+
+    result = refine_pose_rgbd(run_dir, frames="reference")
+
+    obj_report = json.loads((object_dir / "pose_refinement_report.json").read_text(encoding="utf-8"))
+    assert result.report["status"] == "passed"
+    assert obj_report["status"] == "accepted"
+    assert obj_report["camera_source"] == "explicit"
+    assert obj_report["metrics"]["silhouette_mask_iou"] >= 0.65
+    assert obj_report["metrics"]["projected_bbox_iou"] is not None
+    assert obj_report["metrics"]["depth_median_abs_m"] <= 0.03
+    assert obj_report["metrics"]["depth_p90_abs_m"] <= 0.08
+    assert obj_report["metrics"]["projected_center_error_px"] <= 20.0
+    assert "mask_iou_ref" not in obj_report["metrics"]
 
 
 def test_qa_object_alignment_passes_when_reports_meet_rgbd_thresholds(tmp_path):
@@ -245,7 +328,7 @@ def test_qa_object_alignment_passes_when_reports_meet_rgbd_thresholds(tmp_path):
                 "source": "rgbd_refined_from_auto",
                 "operation": "rgbd_mask_mesh_pose_verification",
                 "metrics": {
-                    "mask_iou_ref": 0.8,
+                    "silhouette_mask_iou": 0.8,
                     "depth_median_abs_m": 0.01,
                     "depth_p90_abs_m": 0.03,
                     "support_gap_abs_m": 0.001,

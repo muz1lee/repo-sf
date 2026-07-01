@@ -55,7 +55,7 @@ def test_run_smoke_reconstruction_writes_manifest_mesh_export_and_qa(tmp_path):
     assert "element vertex 6" in (out / "objects" / "blue_cup" / "object_cloud.ply").read_text(encoding="utf-8")
     qa = json.loads((out / "qa" / "qa_report.json").read_text(encoding="utf-8"))
     assert qa["object_count"] == 1
-    assert qa["objects"][0]["mask_iou"] == 1.0
+    assert qa["objects"][0]["bbox_iou"] == 1.0
     assert qa["objects"][0]["object_point_count"] == 6
     assert qa["scene_point_cloud"] == "scene_cloud.ply"
     assert qa["objects"][0]["needs_manual_refine"] is False

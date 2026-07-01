@@ -111,6 +111,8 @@ def register_3dgs_background(run_dir: str | Path, *, method: str = "camera-sim3"
     bg_dir.mkdir(parents=True, exist_ok=True)
     gs_status = _load_3dgs_status(run)
     gs_completed = gs_status.get("status") == "completed"
+    if method == "known-phone-sim-world":
+        return _register_known_phone_sim_world(run, bg_dir, gs_status, gs_completed, write=write)
     camera = _load_json(run / "camera.json")
     anchor = _load_json(bg_dir / "3dgs_camera_pose.json")
     blocking_reasons: list[str] = []
@@ -224,6 +226,128 @@ def register_3dgs_background(run_dir: str | Path, *, method: str = "camera-sim3"
     return BackgroundRegistrationResult(path=path, data=data)
 
 
+def _register_known_phone_sim_world(
+    run: Path,
+    bg_dir: Path,
+    gs_status: dict[str, Any],
+    gs_completed: bool,
+    *,
+    write: bool,
+) -> BackgroundRegistrationResult:
+    bg_only_transform = _opencv_cloud_to_sim_world(_support_height_m(run))
+    evidence, evidence_reasons = _phone_sim_world_identity_evidence(run)
+    blocking_reasons = list(evidence_reasons)
+    if not gs_completed:
+        blocking_reasons.append("3dgs_training_not_completed")
+    identity_allowed = not blocking_reasons
+    identity = np.eye(4, dtype=np.float64).tolist()
+    if identity_allowed:
+        data = {
+            "version": 1,
+            "source_kind": "registered_3dgs",
+            "status": "registered",
+            "method": "known-phone-sim-world",
+            "scale": 1.0,
+            "scale_source": "arkit_sceneDepth_meters",
+            "identity_allowed": True,
+            "evidence": evidence,
+            "coordinate_convention": {
+                "3dgs": "trained_with_phone_sim_world_camera_poses",
+                "sim": "phone_sim_world_meters",
+            },
+            "metrics": {
+                "anchor_camera_count": int(evidence.get("frame_count", 0)),
+                "camera_center_rmse_m": 0.0,
+            },
+            "T_bg_only_cloud_to_sim_world": bg_only_transform,
+            "T_3dgs_world_to_sim_world": identity,
+            "transforms": {
+                "T_bg_only_cloud_to_sim_world": bg_only_transform,
+                "T_3dgs_world_to_sim_world": identity,
+            },
+            "transform_sources": {
+                "T_bg_only_cloud_to_sim_world": "opencv_camera_cloud_to_z_up_world_using_support_height",
+                "T_3dgs_world_to_sim_world": "identity_allowed_by_phone_sim_world_training",
+            },
+            "registrations": {
+                "bg_only_cloud": {
+                    "status": "registered" if (run / "background" / "bg_only_cloud.ply").is_file() else "missing",
+                    "transform": bg_only_transform,
+                    "transform_source": "opencv_camera_cloud_to_z_up_world_using_support_height",
+                    "scale_source": "input_metric_depth",
+                },
+                "3dgs": {
+                    "status": "registered",
+                    "transform": identity,
+                    "transform_source": "identity_allowed_by_phone_sim_world_training",
+                    "scale_source": "arkit_sceneDepth_meters",
+                    "identity_allowed": True,
+                    "blocked_reason": None,
+                },
+            },
+            "assets": {
+                "bg_only_cloud": _rel_if_exists(run, run / "background" / "bg_only_cloud.ply"),
+                "3dgs_native_asset_candidate": _rel_if_exists(run, _native_3dgs_asset_path(run)),
+                "full_scene_cloud_debug": _rel_if_exists(run, run / "scene_cloud.ply"),
+            },
+            "gaussian_splat": _gaussian_splat_metadata(gs_status, run, "registered_3dgs", "registered"),
+        }
+    else:
+        data = {
+            "version": 1,
+            "source_kind": "registered_3dgs",
+            "status": "blocked_identity_transform_without_phone_sim_world_evidence",
+            "method": "known-phone-sim-world",
+            "scale": None,
+            "scale_source": "unknown",
+            "identity_allowed": False,
+            "evidence": evidence,
+            "T_bg_only_cloud_to_sim_world": bg_only_transform,
+            "T_3dgs_world_to_sim_world": None,
+            "transforms": {
+                "T_bg_only_cloud_to_sim_world": bg_only_transform,
+                "T_3dgs_world_to_sim_world": None,
+            },
+            "transform_sources": {
+                "T_bg_only_cloud_to_sim_world": "opencv_camera_cloud_to_z_up_world_using_support_height",
+                "T_3dgs_world_to_sim_world": "blocked_identity_transform_without_phone_sim_world_evidence",
+            },
+            "registrations": {
+                "bg_only_cloud": {
+                    "status": "registered" if (run / "background" / "bg_only_cloud.ply").is_file() else "missing",
+                    "transform": bg_only_transform,
+                    "transform_source": "opencv_camera_cloud_to_z_up_world_using_support_height",
+                    "scale_source": "input_metric_depth",
+                },
+                "3dgs": {
+                    "status": "blocked_identity_transform_without_phone_sim_world_evidence",
+                    "transform": None,
+                    "transform_source": "blocked_identity_transform_without_phone_sim_world_evidence",
+                    "scale_source": None,
+                    "identity_allowed": False,
+                    "blocked_reason": "Identity transform requires phone capture Nerfstudio export with pose_world=sim.",
+                },
+            },
+            "assets": {
+                "bg_only_cloud": _rel_if_exists(run, run / "background" / "bg_only_cloud.ply"),
+                "3dgs_native_asset_candidate": _rel_if_exists(run, _native_3dgs_asset_path(run)),
+                "full_scene_cloud_debug": _rel_if_exists(run, run / "scene_cloud.ply"),
+            },
+            "gaussian_splat": _gaussian_splat_metadata(
+                gs_status,
+                run,
+                "registered_3dgs",
+                "blocked_identity_transform_without_phone_sim_world_evidence",
+            ),
+            "blocking_reasons": _dedupe(blocking_reasons),
+            "blocked_reason": "Identity T_3dgs_world_to_sim_world is forbidden without phone sim-world training evidence.",
+        }
+    path = bg_dir / "registration.json"
+    if write:
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    return BackgroundRegistrationResult(path=path, data=data)
+
+
 def qa_background_registration(run_dir: str | Path, *, heldout_frames: int = 16) -> dict[str, Any]:
     run = Path(run_dir)
     qa_dir = run / "qa"
@@ -314,6 +438,46 @@ def _3dgs_transform_record(
         "blocked_missing_camera_pose_scale_evidence",
         "blocked_missing_camera_pose_scale_evidence",
     )
+
+
+def _phone_sim_world_identity_evidence(run: Path) -> tuple[dict[str, Any], list[str]]:
+    transforms_path = run / "video" / "nerfstudio_phone" / "transforms.json"
+    evidence: dict[str, Any] = {
+        "transforms_path": str(transforms_path.relative_to(run)),
+        "phone_capture_pose_world": None,
+        "identity_allowed": False,
+        "frame_count": 0,
+    }
+    if not transforms_path.is_file():
+        return evidence, ["missing_phone_sim_world_3dgs_training_evidence"]
+    transforms = _load_json(transforms_path)
+    phone = transforms.get("phone_capture", {}) if isinstance(transforms.get("phone_capture"), dict) else {}
+    frames = transforms.get("frames", []) if isinstance(transforms.get("frames"), list) else []
+    evidence.update(
+        {
+            "phone_capture_pose_world": phone.get("pose_world"),
+            "camera_pose_world": phone.get("camera_pose_world"),
+            "identity_allowed": bool(phone.get("identity_3dgs_to_sim_allowed_if_trained_with_pose_world")),
+            "intrinsics_source": phone.get("intrinsics_source"),
+            "extrinsics_source": phone.get("extrinsics_source"),
+            "scale_source": phone.get("scale_source"),
+            "frame_count": len(frames),
+        }
+    )
+    reasons: list[str] = []
+    if phone.get("pose_world") != "sim" or phone.get("camera_pose_world") != "sim":
+        reasons.append("phone_capture_pose_world_not_sim")
+    if phone.get("identity_3dgs_to_sim_allowed_if_trained_with_pose_world") is not True:
+        reasons.append("identity_not_allowed_by_phone_capture_export")
+    if phone.get("intrinsics_source") != "arkit_explicit":
+        reasons.append("phone_intrinsics_not_arkit_explicit")
+    if phone.get("extrinsics_source") != "arkit_explicit":
+        reasons.append("phone_extrinsics_not_arkit_explicit")
+    if phone.get("scale_source") != "arkit_sceneDepth_meters":
+        reasons.append("phone_scale_not_arkit_sceneDepth_meters")
+    if not frames:
+        reasons.append("phone_nerfstudio_frames_missing")
+    return evidence, reasons
 
 
 def _gaussian_splat_metadata(

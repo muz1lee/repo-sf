@@ -35,10 +35,19 @@ def estimate_and_apply_support_plane(run_dir: str | Path, *, force: bool = False
     if not objects:
         raise ValueError("scene_manifest.json has no objects for support-plane estimation")
     before_bottoms = _object_bottoms(run, objects)
-    height, source = _estimate_height_from_point_rings(run, objects)
+    phone_plane = _estimate_phone_support_from_depth(run)
+    height, source = (
+        (float(phone_plane["height_world_m"]), "arkit_depth_point_cloud_plane")
+        if phone_plane.get("status") == "passed"
+        else _estimate_height_from_point_rings(run, objects)
+    )
     if height is None:
         height = float(np.median(list(before_bottoms.values())))
         source = "object_mesh_bottom_median"
+
+    phone_plane_used = phone_plane.get("status") == "passed"
+    if phone_plane_used:
+        _shift_phone_camera_world(run, support_height_m=float(height))
 
     for item in objects:
         transform = _transform_array(item["T_object_to_world"])
@@ -57,7 +66,11 @@ def estimate_and_apply_support_plane(run_dir: str | Path, *, force: bool = False
         _update_pose_file(run, item["object_id"], transform)
 
     after_bottoms = _object_bottoms(run, objects)
-    table_report = _write_table_collision_mesh(run, objects, support_height_m=height)
+    table_report = (
+        _write_phone_table_collision_mesh(run, phone_plane, support_height_m=height)
+        if phone_plane_used
+        else _write_table_collision_mesh(run, objects, support_height_m=height)
+    )
     support_plane = {
         "status": "estimated",
         "source_backend": source,
@@ -149,6 +162,291 @@ def _estimate_height_from_point_rings(run: Path, objects: list[dict[str, Any]]) 
     if not heights:
         return None, "unavailable"
     return float(np.median(heights)), "background_point_ring_median"
+
+
+def _estimate_phone_support_from_depth(run: Path) -> dict[str, Any]:
+    """Estimate a support plane from imported phone RGB-D frames.
+
+    The phone route is intentionally evidence-gated: it only runs when import
+    wrote explicit ARKit intrinsics, poses, and meter-scale depth.
+    """
+    camera = _load_json_doc(run / "camera.json")
+    trajectory = _load_json_doc(run / "trajectory.json")
+    if (
+        camera.get("intrinsics_source") != "arkit_explicit"
+        or camera.get("extrinsics_source") != "arkit_explicit"
+        or camera.get("scale_source") != "arkit_sceneDepth_meters"
+    ):
+        return {"status": "unavailable", "blocked_reason": "phone_explicit_camera_evidence_missing"}
+    if str(camera.get("depth_unit", "meter")).lower() not in {"meter", "meters", "m"}:
+        return {"status": "blocked", "blocked_reason": "phone_depth_unit_not_meter"}
+
+    frame = _first_phone_depth_frame(run, trajectory)
+    if frame is None:
+        return {"status": "unavailable", "blocked_reason": "phone_depth_frame_missing"}
+    k = _camera_matrix_from_dict(camera)
+    transform = _transform_array(frame["T_camera_to_world"])
+    depth = np.load(run / frame["depth_path"])
+    confidence = np.asarray(Image.open(run / frame["confidence_path"]).convert("L"))
+    if depth.ndim != 2 or confidence.shape != depth.shape or k is None:
+        return {"status": "blocked", "blocked_reason": "invalid_phone_depth_or_camera_shape"}
+
+    valid = np.isfinite(depth) & (depth > 0.0) & (confidence > 0)
+    if int(np.count_nonzero(valid)) < 16:
+        return {"status": "blocked", "blocked_reason": "insufficient_confident_phone_depth_points"}
+
+    points_world = _backproject_depth_to_world(depth, valid, k, transform)
+    height = float(np.median(points_world[:, 2]))
+    residual = np.abs(points_world[:, 2] - height)
+    planar_valid_flat = residual <= TABLETOP_PLANE_RESIDUAL_TOLERANCE_M
+    planar_valid = np.zeros(depth.shape, dtype=bool)
+    planar_valid[np.where(valid)] = planar_valid_flat
+    if int(np.count_nonzero(planar_valid)) < 16:
+        return {"status": "blocked", "blocked_reason": "insufficient_planar_phone_depth_points"}
+
+    kernel = np.ones((3, 3), dtype=np.uint8)
+    selected = cv2.erode(planar_valid.astype(np.uint8), kernel, iterations=1).astype(bool)
+    if selected.shape[0] > 2 and selected.shape[1] > 2:
+        selected[0, :] = False
+        selected[-1, :] = False
+        selected[:, 0] = False
+        selected[:, -1] = False
+    if int(np.count_nonzero(selected)) < 16:
+        selected = planar_valid
+    selected_points_world = _backproject_depth_to_world(depth, selected, k, transform)
+    polygon_xy = _convex_hull_xy(selected_points_world[:, :2])
+    if polygon_xy is None:
+        return {"status": "blocked", "blocked_reason": "insufficient_phone_table_polygon_points"}
+
+    background_dir = run / "background"
+    background_dir.mkdir(parents=True, exist_ok=True)
+    tabletop_mask_path = background_dir / "tabletop_mask.png"
+    support_report_path = background_dir / "tabletop_support_report.json"
+    Image.fromarray(selected.astype(np.uint8) * 255).save(tabletop_mask_path)
+    extent_x = float(np.max(polygon_xy[:, 0]) - np.min(polygon_xy[:, 0]))
+    extent_y = float(np.max(polygon_xy[:, 1]) - np.min(polygon_xy[:, 1]))
+    report = {
+        "status": "passed",
+        "source": "arkit_depth_point_cloud_plane",
+        "mask_path": str(tabletop_mask_path.relative_to(run)),
+        "report_path": str(support_report_path.relative_to(run)),
+        "support_height_m": height,
+        "candidate_count": int(np.count_nonzero(valid)),
+        "planar_candidate_count": int(np.count_nonzero(planar_valid)),
+        "selected_component_area": int(np.count_nonzero(selected)),
+        "selected_candidate_ratio": float(np.count_nonzero(selected) / max(1, np.count_nonzero(valid))),
+        "selected_planar_candidate_ratio": float(np.count_nonzero(selected) / max(1, np.count_nonzero(planar_valid))),
+        "plane_residual_median_m": float(np.median(residual)),
+        "plane_residual_p90_m": float(np.percentile(residual, 90.0)),
+        "polygon_extent_x_m": extent_x,
+        "polygon_extent_y_m": extent_y,
+        "polygon_world_xy": [[float(x), float(y)] for x, y in polygon_xy.tolist()],
+        "frame_id": frame["frame_id"],
+        "depth_path": frame["depth_path"],
+        "confidence_path": frame["confidence_path"],
+    }
+    support_report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    return {"status": "passed", "height_world_m": height, "polygon_xy": polygon_xy, "mask_report": report}
+
+
+def _first_phone_depth_frame(run: Path, trajectory: dict[str, Any]) -> dict[str, Any] | None:
+    frames = trajectory.get("frames", [])
+    if not isinstance(frames, list):
+        return None
+    for frame in frames:
+        if not isinstance(frame, dict):
+            continue
+        depth_path = str(frame.get("depth_path", ""))
+        confidence_path = str(frame.get("confidence_path", ""))
+        if not depth_path or not confidence_path:
+            continue
+        if (run / depth_path).is_file() and (run / confidence_path).is_file() and frame.get("T_camera_to_world") is not None:
+            return {
+                "frame_id": str(frame.get("frame_id") or Path(depth_path).stem),
+                "depth_path": depth_path,
+                "confidence_path": confidence_path,
+                "T_camera_to_world": frame["T_camera_to_world"],
+            }
+    return None
+
+
+def _camera_matrix_from_dict(camera: dict[str, Any]) -> np.ndarray | None:
+    try:
+        if camera.get("K") is not None:
+            k = np.asarray(camera["K"], dtype=np.float64)
+            return k if k.shape == (3, 3) and np.all(np.isfinite(k)) else None
+        return np.asarray(
+            [[float(camera["fx"]), 0.0, float(camera["cx"])], [0.0, float(camera["fy"]), float(camera["cy"])], [0.0, 0.0, 1.0]],
+            dtype=np.float64,
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _backproject_depth_to_world(depth: np.ndarray, mask: np.ndarray, k: np.ndarray, t_camera_to_world: np.ndarray) -> np.ndarray:
+    rows, cols = np.where(mask)
+    z = depth[rows, cols].astype(np.float64)
+    x = (cols.astype(np.float64) - float(k[0, 2])) * z / float(k[0, 0])
+    y = (rows.astype(np.float64) - float(k[1, 2])) * z / float(k[1, 1])
+    points_camera = np.column_stack([x, y, z, np.ones_like(z)])
+    points_world = (t_camera_to_world @ points_camera.T).T[:, :3]
+    finite = np.all(np.isfinite(points_world), axis=1)
+    return points_world[finite]
+
+
+def _convex_hull_xy(points_xy: np.ndarray) -> np.ndarray | None:
+    if points_xy.ndim != 2 or points_xy.shape[1] != 2 or points_xy.shape[0] < 3:
+        return None
+    finite = np.all(np.isfinite(points_xy), axis=1)
+    points = points_xy[finite]
+    if points.shape[0] < 3:
+        return None
+    hull = cv2.convexHull(points.astype(np.float32)).reshape(-1, 2).astype(np.float64)
+    return hull if hull.shape[0] >= 3 else None
+
+
+def _shift_phone_camera_world(run: Path, *, support_height_m: float) -> None:
+    if abs(float(support_height_m)) <= 1e-9:
+        return
+    camera_path = run / "camera.json"
+    camera = _load_json_doc(camera_path)
+    if camera.get("intrinsics_source") == "arkit_explicit" and camera.get("extrinsics_source") == "arkit_explicit":
+        shifted = _shift_camera_to_world_z(camera.get("T_camera_to_world"), support_height_m=support_height_m)
+        if shifted is not None:
+            camera["T_camera_to_world"] = shifted.tolist()
+            camera["T_world_to_camera"] = np.linalg.inv(shifted).tolist()
+            camera["pose_world"] = "sim"
+            camera["support_plane_shift_applied_m"] = float(support_height_m)
+            camera_path.write_text(json.dumps(camera, indent=2), encoding="utf-8")
+
+    trajectory_path = run / "trajectory.json"
+    trajectory = _load_json_doc(trajectory_path)
+    frames = trajectory.get("frames", [])
+    if isinstance(frames, list):
+        for frame in frames:
+            if not isinstance(frame, dict):
+                continue
+            shifted = _shift_camera_to_world_z(frame.get("T_camera_to_world"), support_height_m=support_height_m)
+            if shifted is not None:
+                frame["T_camera_to_world"] = shifted.tolist()
+        trajectory["pose_world"] = "sim"
+        trajectory["support_plane_shift_applied_m"] = float(support_height_m)
+        trajectory_path.write_text(json.dumps(trajectory, indent=2), encoding="utf-8")
+
+
+def _shift_camera_to_world_z(value: object, *, support_height_m: float) -> np.ndarray | None:
+    try:
+        transform = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError):
+        return None
+    if transform.shape != (4, 4) or not np.all(np.isfinite(transform)):
+        return None
+    transform = transform.copy()
+    transform[2, 3] -= float(support_height_m)
+    return transform
+
+
+def _write_phone_table_collision_mesh(run: Path, phone_plane: dict[str, Any], *, support_height_m: float) -> dict[str, Any]:
+    polygon_xy = np.asarray(phone_plane["polygon_xy"], dtype=np.float64)
+    mask_report = dict(phone_plane.get("mask_report", {}))
+    thickness = 0.04
+    x0, y0 = np.min(polygon_xy, axis=0)
+    x1, y1 = np.max(polygon_xy, axis=0)
+    size = [float(x1 - x0), float(y1 - y0), float(thickness)]
+    if min(size[0], size[1]) < MIN_FINAL_TABLE_EXTENT_M:
+        collision_report = _write_table_collision_report(
+            run,
+            {
+                "status": "blocked",
+                "blocked_reason": "table_collision_extent_too_small",
+                "source_backend": "arkit_depth_point_cloud_plane",
+                "geometry_type": "polygon_slab",
+                "final": False,
+                "table_collision_size_xyz": size,
+                "min_final_table_extent_m": float(MIN_FINAL_TABLE_EXTENT_M),
+            },
+        )
+        return {
+            "table_collision_mesh_path": "",
+            "table_collision_source_backend": "arkit_depth_point_cloud_plane",
+            "table_collision_geometry_type": "polygon_slab",
+            "table_collision_final": False,
+            "support_surface_status": "blocked",
+            "support_surface_blocked_reason": "table_collision_extent_too_small",
+            "table_collision_report_path": collision_report,
+        }
+
+    center = [float((x0 + x1) * 0.5), float((y0 + y1) * 0.5), float(-thickness * 0.5)]
+    center_xy = np.asarray(center[:2], dtype=np.float64)
+    mesh = _polygon_slab_mesh(polygon_xy - center_xy, thickness=thickness)
+    table_path = run / "table" / "collision_polygon_slab.glb"
+    table_path.parent.mkdir(parents=True, exist_ok=True)
+    mesh.export(table_path)
+
+    background_dir = run / "background"
+    background_dir.mkdir(parents=True, exist_ok=True)
+    polygon_path = background_dir / "table_polygon_world.json"
+    polygon_payload = {
+        "status": "passed",
+        "geometry_type": "polygon_slab",
+        "source_backend": "arkit_depth_point_cloud_plane",
+        "polygon_world_xy": [[float(x), float(y)] for x, y in polygon_xy.tolist()],
+        "polygons_world_xy": [[[float(x), float(y)] for x, y in polygon_xy.tolist()]],
+        "polygon_count": 1,
+        "visible_tabletop_polygon_count": 1,
+        "object_support_footprint_polygon_count": 0,
+        "support_height_m": float(support_height_m),
+        "top_z_m": 0.0,
+        "thickness_m": float(thickness),
+        "input_point_count": int(mask_report.get("selected_component_area", 0) or 0),
+        "candidate_count": int(mask_report.get("candidate_count", 0) or 0),
+        "planar_candidate_count": int(mask_report.get("planar_candidate_count", 0) or 0),
+        "selected_component_area": int(mask_report.get("selected_component_area", 0) or 0),
+        "selected_candidate_ratio": float(mask_report.get("selected_candidate_ratio", 0.0) or 0.0),
+        "selected_planar_candidate_ratio": float(mask_report.get("selected_planar_candidate_ratio", 0.0) or 0.0),
+        "polygon_extent_x_m": float(size[0]),
+        "polygon_extent_y_m": float(size[1]),
+    }
+    polygon_path.write_text(json.dumps(polygon_payload, indent=2), encoding="utf-8")
+    collision_report_path = _write_table_collision_report(
+        run,
+        {
+            "status": "passed",
+            "blocked_reason": None,
+            "source_backend": "arkit_depth_point_cloud_plane",
+            "geometry_type": "polygon_slab",
+            "final": True,
+            "mesh_path": str(table_path.relative_to(run)),
+            "polygon_path": str(polygon_path.relative_to(run)),
+            "table_collision_size_xyz": size,
+            "vertex_count": int(len(mesh.vertices)),
+            "face_count": int(len(mesh.faces)),
+            "polygon_count": 1,
+            "candidate_count": int(mask_report.get("candidate_count", 0) or 0),
+            "selected_component_area": int(mask_report.get("selected_component_area", 0) or 0),
+            "selected_candidate_ratio": float(mask_report.get("selected_candidate_ratio", 0.0) or 0.0),
+            "polygon_extent_x_m": float(size[0]),
+            "polygon_extent_y_m": float(size[1]),
+        },
+    )
+    return {
+        "table_collision_mesh_path": str(table_path.relative_to(run)),
+        "table_collision_source_backend": "arkit_depth_point_cloud_plane",
+        "table_collision_geometry_type": "polygon_slab",
+        "table_collision_final": True,
+        "support_surface_status": "passed",
+        "support_surface_blocked_reason": None,
+        "table_bounds_world_xy": [[float(x0), float(y0)], [float(x1), float(y1)]],
+        "table_collision_pos_world": center,
+        "table_collision_quat_wxyz": [1.0, 0.0, 0.0, 0.0],
+        "table_collision_size_xyz": size,
+        "table_top_z_m": 0.0,
+        "table_thickness_m": float(thickness),
+        "tabletop_mask_path": str(mask_report.get("mask_path", "background/tabletop_mask.png")),
+        "tabletop_support_report_path": str(mask_report.get("report_path", "background/tabletop_support_report.json")),
+        "table_polygon_world_path": str(polygon_path.relative_to(run)),
+        "table_collision_report_path": collision_report_path,
+    }
 
 
 def _write_table_collision_mesh(run: Path, objects: list[dict[str, Any]], *, support_height_m: float) -> dict[str, Any]:
@@ -665,6 +963,14 @@ def _read_mask(path: Path, shape: tuple[int, int] | None) -> np.ndarray | None:
     if shape is not None and mask.shape != shape:
         return None
     return mask
+
+
+def _load_json_doc(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    value = json.loads(path.read_text(encoding="utf-8"))
+    return value if isinstance(value, dict) else {}
+
 
 def _table_bounds_from_background_points(
     run: Path,

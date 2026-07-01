@@ -146,7 +146,7 @@ def write_table_collision_projection_qa(
             if projection_iou < iou_threshold:
                 reasons.append("low_tabletop_projection_iou")
 
-    derived_sources = {"tabletop_mask", "tabletop_mask_polygon_slab", "tabletop_mask_convex_hull"}
+    derived_sources = {"tabletop_mask", "tabletop_mask_polygon_slab", "tabletop_mask_convex_hull", "arkit_depth_point_cloud_plane"}
     derived = source_backend in derived_sources and geometry_type in {"polygon_slab", "convex_hull_slab"}
     if not derived:
         reasons.append("table_collision_not_tabletop_mask_derived")
