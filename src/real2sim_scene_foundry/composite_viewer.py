@@ -23,16 +23,24 @@ class CompositeViewerResult:
     url_path: str
 
 
-def export_composite_viewer(run_dir: str | Path, *, backend: str = "external-sidecar", show_settled: bool = False) -> CompositeViewerResult:
+def export_composite_viewer(
+    run_dir: str | Path,
+    *,
+    backend: str = "external-sidecar",
+    show_settled: bool = False,
+    mode: str = "scene",
+) -> CompositeViewerResult:
     run = Path(run_dir)
-    manifest_path = run / "scene_manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    qa_path = run / "qa" / "qa_report.json"
-    qa = json.loads(qa_path.read_text(encoding="utf-8")) if qa_path.is_file() else {}
-
     viewer_dir = run / "exports" / "composite_viewer"
     viewer_dir.mkdir(parents=True, exist_ok=True)
-    config = _viewer_config(run, viewer_dir, manifest, _qa_with_genesis_fallback(run, qa), backend=backend, show_settled=show_settled)
+    if mode == "bg-table":
+        config = _bg_table_viewer_config(run, viewer_dir, backend=backend)
+    else:
+        manifest_path = run / "scene_manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        qa_path = run / "qa" / "qa_report.json"
+        qa = json.loads(qa_path.read_text(encoding="utf-8")) if qa_path.is_file() else {}
+        config = _viewer_config(run, viewer_dir, manifest, _qa_with_genesis_fallback(run, qa), backend=backend, show_settled=show_settled)
     _write_viewer_audits(run, viewer_dir, config)
     config_path = viewer_dir / "viewer_config.json"
     config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
@@ -52,9 +60,13 @@ def serve_composite_viewer(
     port: int = 7010,
     backend: str = "external-sidecar",
     show_settled: bool = False,
+    mode: str = "scene",
 ) -> None:
     run = Path(run_dir)
-    export_composite_viewer(run, backend=backend, show_settled=show_settled)
+    if mode == "scene":
+        export_composite_viewer(run, backend=backend, show_settled=show_settled)
+    else:
+        export_composite_viewer(run, backend=backend, show_settled=show_settled, mode=mode)
     handler = partial(SimpleHTTPRequestHandler, directory=str(run))
     server = ThreadingHTTPServer((host, int(port)), handler)
     server.serve_forever()
@@ -139,6 +151,148 @@ def _viewer_config(
         },
     }
     return config
+
+
+def _bg_table_viewer_config(run: Path, viewer_dir: Path, *, backend: str) -> dict[str, Any]:
+    registration = load_background_registration(run) or {}
+    bg_report = _read_json(run / "qa" / "bg_table_report.json")
+    table_report = _read_json(run / "table" / "collision_polygon_slab_report.json")
+    trajectory = _read_json(run / "trajectory.json")
+    camera = _read_json(run / "camera.json")
+    native_3dgs_asset = _native_3dgs_asset_path(run)
+    table_mesh = run / "table" / "collision_polygon_slab.glb"
+    table_usd = run / "table" / "collision_polygon_slab.usd"
+    overlays = sorted((run / "qa").glob("bg3dgs_table_overlay_*.png"))
+    registered = registration.get("status") == "registered" and registration.get("T_3dgs_world_to_sim_world") is not None
+    native_asset_ready = native_3dgs_asset.is_file()
+    background_status = "registered_3dgs_runtime_unverified" if registered and native_asset_ready else "blocked_missing_registered_3dgs"
+    viewer_status = "blocked_browser_3dgs_runtime_not_verified" if backend == "browser-3dgs" else "partial_registered_3dgs_transform_only"
+    frames = [frame for frame in trajectory.get("frames", []) if isinstance(frame, dict)]
+    return {
+        "version": 1,
+        "mode": "bg-table",
+        "scope": "background_3dgs_and_table_collision_only",
+        "status": "partial" if registered and table_mesh.is_file() else "blocked",
+        "status_reason": viewer_status,
+        "run_name": run.name,
+        "viewer_backend": backend,
+        "coordinate_frame": "sim_world",
+        "background": {
+            "source_kind": "registered_3dgs",
+            "mode_label": "registered_3dgs_browser_runtime_requested",
+            "source_backend": "browser_3dgs_runtime" if backend == "browser-3dgs" else "registered_3dgs_transform",
+            "status": background_status,
+            "viewer_status": viewer_status,
+            "render_mode": "browser_3dgs_registered_asset" if backend == "browser-3dgs" else "registered_3dgs_transform_only",
+            "live_3dgs_runtime": False,
+            "orbit_policy": "free_orbit_blocked_until_runtime_verified",
+            "camera_lock_required": False,
+            "provenance_label": "registered 3DGS transform with native runtime unverified",
+            "diagnostic_only": True,
+            "is_final_visual": False,
+            "simulator_native": False,
+            "image_path": None,
+            "image_size": [camera.get("width", 1280), camera.get("height", 720)],
+            "point_cloud_path": _rel(viewer_dir, native_3dgs_asset) if native_asset_ready else None,
+            "point_cloud_diagnostic_only": True,
+            "native_asset_candidate_path": _rel(viewer_dir, native_3dgs_asset) if native_asset_ready else None,
+            "registration_path": _rel(viewer_dir, run / "background" / "registration.json")
+            if (run / "background" / "registration.json").is_file()
+            else None,
+            "registration": registration,
+            "point_cloud_transform": {
+                "source_frame": "3dgs_world_meters",
+                "target_frame": "sim_world",
+                "support_height_m": 0.0,
+                "matrix": registration.get("T_3dgs_world_to_sim_world"),
+            },
+            "gaussian_splat": {
+                "status": "registered_3dgs" if registered else "blocked",
+                "native_asset_path": "background/3dgs_native/splat_rgb.ply" if native_asset_ready else None,
+                "native_rendering": False,
+                "runtime_status": viewer_status,
+            },
+            "browser_3dgs": {
+                "asset_path": _rel(viewer_dir, native_3dgs_asset) if native_asset_ready else None,
+                "runtime_status": viewer_status,
+                "registration_transform": registration.get("T_3dgs_world_to_sim_world"),
+                "blocked_reason": "browser-native 3DGS loader/runtime evidence is not available.",
+            },
+            "background_layers": {
+                "live_3dgs_runtime": {"status": "asset_candidate_only" if native_asset_ready else "unavailable", "simulator_native": False},
+                "external_3dgs_png_sidecar": {"status": "ignored_in_bg_table_mode", "simulator_native": False},
+                "bg_only_diagnostic_cloud": {"status": "ignored_in_bg_table_mode"},
+                "full_scene_debug_cloud": {"status": "ignored_in_bg_table_mode"},
+            },
+        },
+        "reference_camera": _bg_table_reference_camera(camera),
+        "support_plane": {
+            "status": "passed" if table_mesh.is_file() else "missing",
+            "source_backend": table_report.get("source_backend") or "arkit_depth_ransac_plane",
+            "geometry_type": "polygon_slab",
+            "final_or_proxy": "final" if table_mesh.is_file() else "missing",
+            "top_z": table_report.get("top_z_m"),
+            "thickness": table_report.get("thickness_m"),
+            "mesh_path": _rel(viewer_dir, table_mesh) if table_mesh.is_file() else None,
+            "qa_status": bg_report.get("status"),
+            "label": "phone depth RANSAC tabletop polygon collision",
+            "table_collision_mesh_path": _rel(viewer_dir, table_mesh) if table_mesh.is_file() else None,
+            "table_collision_usd_path": _rel(viewer_dir, table_usd) if table_usd.is_file() else None,
+            "blocking_reasons": bg_report.get("blocking_reasons", []),
+            "projection_iou": (bg_report.get("table_collision") or {}).get("projection_iou"),
+            "visible_iou": (bg_report.get("table_collision") or {}).get("visible_iou"),
+            "overreach_ratio": (bg_report.get("table_collision") or {}).get("overreach_ratio"),
+            "undercoverage_ratio": (bg_report.get("table_collision") or {}).get("undercoverage_ratio"),
+        },
+        "camera_frustums": {
+            "count": len(frames),
+            "trajectory_path": _rel(viewer_dir, run / "trajectory.json") if (run / "trajectory.json").is_file() else None,
+            "frames": [
+                {
+                    "frame_id": frame.get("frame_id"),
+                    "rgb_path": _rel(viewer_dir, run / str(frame.get("rgb_path"))) if frame.get("rgb_path") else None,
+                }
+                for frame in frames
+            ],
+        },
+        "pose_display": {"status": "not_in_scope", "toggle_enabled": False, "default_mode": "initial"},
+        "objects": [],
+        "audits": {
+            "object_path_audit": "object_path_audit.json",
+            "background_provenance_audit": "background_provenance_audit.json",
+        },
+        "qa": {
+            "bg_table_report_path": _rel(viewer_dir, run / "qa" / "bg_table_report.json") if (run / "qa" / "bg_table_report.json").is_file() else None,
+            "overlays": [_rel(viewer_dir, path) for path in overlays],
+            "projection_iou": (bg_report.get("table_collision") or {}).get("projection_iou"),
+            "depth_plane_median_abs_residual_m": (bg_report.get("table_collision") or {}).get("depth_plane_median_abs_residual_m"),
+            "stability_status": "not_in_scope",
+        },
+        "provenance": {
+            "object_assets": "ignored",
+            "object_poses": "ignored",
+            "object_physics": "ignored",
+            "simulator_native_3dgs": False,
+            "simulator_native_3dgs_evidence": "not_claimed_without_native_runtime_evidence",
+        },
+    }
+
+
+def _bg_table_reference_camera(camera: dict[str, Any]) -> dict[str, Any]:
+    width = int(camera.get("width", 1280) or 1280)
+    height = int(camera.get("height", 720) or 720)
+    fy = float(camera.get("fy", 0.0) or 0.0)
+    fov_y_deg = 55.0 if fy <= 0.0 else math.degrees(2.0 * math.atan(float(height) / (2.0 * fy)))
+    return {
+        "mode": "phone_camera_frustums",
+        "intrinsics_source": "camera.json",
+        "image_size": [width, height],
+        "fx": camera.get("fx"),
+        "fy": camera.get("fy"),
+        "cx": camera.get("cx"),
+        "cy": camera.get("cy"),
+        "fov_y_deg": float(fov_y_deg),
+    }
 
 
 def _viewer_status(background: dict[str, Any]) -> tuple[str, str]:

@@ -1,0 +1,324 @@
+import json
+from pathlib import Path
+
+import numpy as np
+import pytest
+import trimesh
+from PIL import Image
+
+from real2sim_scene_foundry.cli import main
+
+
+def _identity4():
+    return [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
+
+
+def _write_ascii_splat(path: Path, points: list[tuple[float, float, float]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    header = [
+        "ply",
+        "format ascii 1.0",
+        f"element vertex {len(points)}",
+        "property float x",
+        "property float y",
+        "property float z",
+        "property uchar red",
+        "property uchar green",
+        "property uchar blue",
+        "end_header",
+    ]
+    rows = [f"{x} {y} {z} 220 180 120" for x, y, z in points]
+    path.write_text("\n".join(header + rows) + "\n", encoding="utf-8")
+
+
+def _write_bg_table_run(run: Path) -> None:
+    (run / "background").mkdir(parents=True)
+    (run / "frames").mkdir()
+    (run / "depth").mkdir()
+    (run / "qa").mkdir()
+    polygon = {
+        "version": 1,
+        "status": "passed",
+        "source_backend": "arkit_depth_ransac_plane",
+        "geometry_type": "support_plane_polygon",
+        "coordinate_world": "sim_world",
+        "coordinate_frame": "sim_world",
+        "unit": "meter",
+        "polygon_world_xy": [[-0.2, -0.2], [0.2, -0.2], [0.2, 0.2], [-0.2, 0.2]],
+        "polygons_world_xy": [[[-0.2, -0.2], [0.2, -0.2], [0.2, 0.2], [-0.2, 0.2]]],
+        "top_z_m": 1.0,
+        "support_height_m": 1.0,
+        "plane": {"normal_world": [0.0, 0.0, 1.0], "offset_m": -1.0},
+    }
+    (run / "background" / "table_polygon_world.json").write_text(json.dumps(polygon), encoding="utf-8")
+    mask = np.zeros((100, 100), dtype=np.uint8)
+    mask[30:71, 30:71] = 255
+    Image.fromarray(mask).save(run / "background" / "tabletop_mask.png")
+    Image.new("RGB", (100, 100), color=(12, 18, 24)).save(run / "frames" / "frame_000000.jpg")
+    depth = np.ones((100, 100), dtype=np.float32)
+    np.save(run / "depth" / "frame_000000.npy", depth)
+    camera = {
+        "width": 100,
+        "height": 100,
+        "fx": 100.0,
+        "fy": 100.0,
+        "cx": 50.0,
+        "cy": 50.0,
+        "K": [[100.0, 0.0, 50.0], [0.0, 100.0, 50.0], [0.0, 0.0, 1.0]],
+        "T_world_to_camera": _identity4(),
+        "T_camera_to_world": _identity4(),
+        "intrinsics_source": "arkit_explicit",
+        "extrinsics_source": "arkit_explicit",
+        "scale_source": "arkit_sceneDepth_meters",
+        "depth_unit": "meter",
+    }
+    (run / "camera.json").write_text(json.dumps(camera), encoding="utf-8")
+    trajectory = {
+        "pose_world": "sim",
+        "frames": [
+            {
+                "frame_id": "frame_000000",
+                "rgb_path": "frames/frame_000000.jpg",
+                "depth_path": "depth/frame_000000.npy",
+                "T_camera_to_world": _identity4(),
+            }
+        ],
+    }
+    (run / "trajectory.json").write_text(json.dumps(trajectory), encoding="utf-8")
+    (run / "background" / "registration.json").write_text(
+        json.dumps(
+            {
+                "status": "registered",
+                "source_kind": "registered_3dgs",
+                "coordinate_convention": {"3dgs": "arkit_world_camera_to_world", "sim": "z_up_meter_camera_to_world"},
+                "coordinate_bridge": {
+                    "status": "closed",
+                    "source": "phone_sim_alignment_arkit_to_sim_world",
+                    "source_world": "arkit",
+                    "target_world": "sim_world",
+                    "phone_sim_alignment_path": "background/phone_sim_alignment.json",
+                },
+                "T_3dgs_world_to_sim_world": _identity4(),
+                "transforms": {"T_3dgs_world_to_sim_world": _identity4()},
+                "transform_sources": {"T_3dgs_world_to_sim_world": "phone_sim_alignment_arkit_to_sim_world"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run / "background" / "phone_sim_alignment.json").write_text(
+        json.dumps(
+            {
+                "status": "passed",
+                "source_backend": "arkit_depth_ransac_plane",
+                "pose_world_before": "arkit",
+                "pose_world_after": "sim",
+                "T_arkit_world_to_sim_world": _identity4(),
+                "metrics": {"plane_residual_median_m": 0.0, "plane_residual_p90_m": 0.0},
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_ascii_splat(
+        run / "background" / "3dgs_native" / "splat_rgb.ply",
+        [(-0.1, -0.1, 1.0), (0.0, 0.0, 1.0), (0.1, 0.1, 1.0), (0.5, 0.5, 1.2)],
+    )
+    (run / "qa" / "registered_3dgs_table_renders.json").write_text(
+        json.dumps(
+            {
+                "status": "rendered",
+                "backend": "browser_3dgs_offscreen",
+                "runtime": "browser-3dgs",
+                "uses_T_3dgs_world_to_sim_world": True,
+                "frames": [
+                    {
+                        "frame_index": 0,
+                        "frame_id": "frame_000000",
+                        "render_path": "qa/bg3dgs_render_000000.png",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    Image.new("RGB", (100, 100), color=(20, 24, 28)).save(run / "qa" / "bg3dgs_render_000000.png")
+
+
+def test_build_table_collision_writes_world_polygon_slab_and_scope(tmp_path):
+    run = tmp_path / "run"
+    _write_bg_table_run(run)
+
+    code = main(
+        [
+            "build-table-collision",
+            "--run-dir",
+            str(run),
+            "--source",
+            "background/table_polygon_world.json",
+            "--height",
+            "0.03",
+            "--write",
+        ]
+    )
+
+    assert code == 0
+    mesh_path = run / "table" / "collision_polygon_slab.glb"
+    usd_path = run / "table" / "collision_polygon_slab.usd"
+    scope = json.loads((run / "qa" / "bg_table_scope.json").read_text(encoding="utf-8"))
+    report = json.loads((run / "table" / "collision_polygon_slab_report.json").read_text(encoding="utf-8"))
+    mesh = trimesh.load(mesh_path, force="mesh")
+    assert mesh_path.is_file()
+    assert usd_path.is_file()
+    assert scope["scope"] == "background_3dgs_and_table_collision_only"
+    assert scope["ignore"]["object_assets"] is True
+    assert scope["ignore"]["object_poses"] is True
+    assert scope["ignore"]["object_physics"] is True
+    assert report["source_backend"] == "arkit_depth_ransac_plane"
+    assert report["coordinate_world"] == "sim_world"
+    assert report["coordinate_frame"] == "sim_world"
+    assert report["unit"] == "meter"
+    assert report["top_z_m"] == pytest.approx(1.0)
+    assert report["thickness_m"] == pytest.approx(0.03)
+    assert report["thickness_direction"] == "down_negative_z"
+    assert float(mesh.vertices[:, 2].max()) == pytest.approx(1.0)
+    assert float(mesh.vertices[:, 2].min()) == pytest.approx(0.97)
+
+
+def test_qa_bg_table_passes_without_objects_and_writes_overlays(tmp_path):
+    run = tmp_path / "run"
+    _write_bg_table_run(run)
+    main(["build-table-collision", "--run-dir", str(run), "--source", "background/table_polygon_world.json", "--write"])
+
+    code = main(["qa-bg-table", "--run-dir", str(run), "--frames", "0", "--write-overlays"])
+
+    assert code == 0
+    report = json.loads((run / "qa" / "bg_table_report.json").read_text(encoding="utf-8"))
+    assert report["status"] == "passed"
+    assert report["scope"] == "background_3dgs_and_table_collision_only"
+    assert report["background"]["registration_status"] == "registered"
+    assert report["background"]["coordinate_bridge_status"] == "closed"
+    assert report["background"]["transform_source"] == "phone_sim_alignment_arkit_to_sim_world"
+    assert report["table_polygon"]["source_backend"] == "arkit_depth_ransac_plane"
+    assert report["table_polygon"]["coordinate_frame"] == "sim_world"
+    assert report["table_polygon"]["unit"] == "meter"
+    assert report["table_collision"]["projection_iou"] >= 0.65
+    assert report["table_collision"]["visible_iou"] >= 0.70
+    assert report["table_collision"]["overreach_ratio"] <= 0.15
+    assert report["table_collision"]["undercoverage_ratio"] <= 0.20
+    assert report["table_collision"]["depth_plane_median_abs_residual_m"] <= 0.02
+    assert report["object_scope"]["ignored"] is True
+    assert report["claim"] == "registered 3DGS background and tabletop collision are aligned in the same sim world"
+    assert report["3dgs_overlay"]["status"] == "rendered"
+    assert report["3dgs_overlay"]["runtime"] == "browser-3dgs"
+    assert report["3dgs_overlay"]["uses_T_3dgs_world_to_sim_world"] is True
+    assert (run / "qa" / "bg3dgs_table_overlay_000000.png").is_file()
+    assert report["splat_center_diagnostic"]["collision_geometry_source"] == "not_used"
+
+
+def test_qa_bg_table_blocks_when_registered_transform_is_missing(tmp_path):
+    run = tmp_path / "run"
+    _write_bg_table_run(run)
+    registration_path = run / "background" / "registration.json"
+    registration = json.loads(registration_path.read_text(encoding="utf-8"))
+    registration["T_3dgs_world_to_sim_world"] = None
+    registration["transforms"]["T_3dgs_world_to_sim_world"] = None
+    registration_path.write_text(json.dumps(registration), encoding="utf-8")
+    main(["build-table-collision", "--run-dir", str(run), "--source", "background/table_polygon_world.json", "--write"])
+
+    code = main(["qa-bg-table", "--run-dir", str(run), "--frames", "0", "--write-overlays"])
+
+    assert code == 0
+    report = json.loads((run / "qa" / "bg_table_report.json").read_text(encoding="utf-8"))
+    assert report["status"] == "blocked"
+    assert "missing_T_3dgs_world_to_sim_world" in report["blocking_reasons"]
+    assert report["claim"] is None
+
+
+def test_qa_bg_table_blocks_when_table_polygon_projection_overreaches_visible_mask(tmp_path):
+    run = tmp_path / "run"
+    _write_bg_table_run(run)
+    polygon_path = run / "background" / "table_polygon_world.json"
+    polygon = json.loads(polygon_path.read_text(encoding="utf-8"))
+    polygon["polygon_world_xy"] = [[-0.6, -0.6], [0.6, -0.6], [0.6, 0.6], [-0.6, 0.6]]
+    polygon["polygons_world_xy"] = [polygon["polygon_world_xy"]]
+    polygon_path.write_text(json.dumps(polygon), encoding="utf-8")
+    main(["build-table-collision", "--run-dir", str(run), "--source", "background/table_polygon_world.json", "--write"])
+
+    code = main(["qa-bg-table", "--run-dir", str(run), "--frames", "0", "--write-overlays"])
+
+    assert code == 0
+    report = json.loads((run / "qa" / "bg_table_report.json").read_text(encoding="utf-8"))
+    assert report["status"] == "blocked"
+    assert report["table_collision"]["raw_overreach_ratio"] > 0.15
+    assert "overreach_ratio_above_threshold" in report["blocking_reasons"]
+    assert report["claim"] is None
+
+
+def test_qa_bg_table_blocks_arkit_3dgs_when_coordinate_bridge_is_not_closed(tmp_path):
+    run = tmp_path / "run"
+    _write_bg_table_run(run)
+    registration_path = run / "background" / "registration.json"
+    registration = json.loads(registration_path.read_text(encoding="utf-8"))
+    registration["coordinate_bridge"] = {"status": "blocked", "source_world": "arkit", "target_world": "sim_world"}
+    registration["transform_sources"]["T_3dgs_world_to_sim_world"] = "camera_anchor_bridge"
+    registration_path.write_text(json.dumps(registration), encoding="utf-8")
+    main(["build-table-collision", "--run-dir", str(run), "--source", "background/table_polygon_world.json", "--write"])
+
+    code = main(["qa-bg-table", "--run-dir", str(run), "--frames", "0", "--write-overlays"])
+
+    assert code == 0
+    report = json.loads((run / "qa" / "bg_table_report.json").read_text(encoding="utf-8"))
+    assert report["status"] == "blocked"
+    assert report["background"]["coordinate_bridge_status"] == "blocked"
+    assert "background_registration_coordinate_bridge_not_closed" in report["blocking_reasons"]
+    assert report["claim"] is None
+
+
+def test_qa_bg_table_is_partial_when_3dgs_overlay_runtime_is_missing(tmp_path):
+    run = tmp_path / "run"
+    _write_bg_table_run(run)
+    (run / "qa" / "registered_3dgs_table_renders.json").unlink()
+    (run / "qa" / "bg3dgs_render_000000.png").unlink()
+    main(["build-table-collision", "--run-dir", str(run), "--source", "background/table_polygon_world.json", "--write"])
+
+    code = main(["qa-bg-table", "--run-dir", str(run), "--frames", "0", "--write-overlays"])
+
+    assert code == 0
+    report = json.loads((run / "qa" / "bg_table_report.json").read_text(encoding="utf-8"))
+    assert report["status"] == "partial"
+    assert report["3dgs_overlay"]["status"] == "blocked"
+    assert "registered_3dgs_overlay_not_rendered" in report["blocking_reasons"]
+    assert report["claim"] is None
+    assert not (run / "qa" / "bg3dgs_table_overlay_000000.png").is_file()
+
+
+def test_composite_viewer_bg_table_mode_does_not_require_scene_manifest_or_objects(tmp_path):
+    run = tmp_path / "run"
+    _write_bg_table_run(run)
+    main(["build-table-collision", "--run-dir", str(run), "--source", "background/table_polygon_world.json", "--write"])
+    main(["qa-bg-table", "--run-dir", str(run), "--frames", "0", "--write-overlays"])
+
+    code = main(
+        [
+            "composite-viewer",
+            "--run-dir",
+            str(run),
+            "--backend",
+            "browser-3dgs",
+            "--mode",
+            "bg-table",
+            "--export-only",
+        ]
+    )
+
+    assert code == 0
+    config = json.loads((run / "exports" / "composite_viewer" / "viewer_config.json").read_text(encoding="utf-8"))
+    assert config["mode"] == "bg-table"
+    assert config["scope"] == "background_3dgs_and_table_collision_only"
+    assert config["objects"] == []
+    assert config["background"]["source_kind"] == "registered_3dgs"
+    assert config["background"]["browser_3dgs"]["asset_path"] == "../../background/3dgs_native/splat_rgb.ply"
+    assert config["background"]["browser_3dgs"]["registration_transform"] == _identity4()
+    assert config["background"]["live_3dgs_runtime"] is False
+    assert config["support_plane"]["table_collision_mesh_path"] == "../../table/collision_polygon_slab.glb"
+    assert config["camera_frustums"]["count"] == 1
+    assert config["qa"]["overlays"] == ["../../qa/bg3dgs_table_overlay_000000.png"]

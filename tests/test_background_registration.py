@@ -156,9 +156,139 @@ def test_register_3dgs_background_writes_camera_bridge_transform_and_qa(tmp_path
     assert result.data["transform_sources"]["T_3dgs_world_to_sim_world"] == "camera_anchor_bridge"
     assert result.data["registrations"]["3dgs"]["status"] == "registered"
     assert qa["status"] == "passed"
+    assert qa["visual_registration_status"] == "not_checked"
+    assert qa["overlay_status"] == "placeholder_not_visual_evidence"
     assert qa["heldout_frames_requested"] == 16
     assert (run / "qa" / "background_registration_report.json").is_file()
-    assert (run / "qa" / "background_registration_overlay.png").is_file()
+    assert qa["overlay_path"] is None
+    assert not (run / "qa" / "background_registration_overlay.png").is_file()
+
+
+def test_register_3dgs_background_closes_arkit_world_with_phone_alignment_bridge(tmp_path):
+    from real2sim_scene_foundry.background_registration import qa_background_registration, register_3dgs_background
+
+    run = tmp_path / "run"
+    (run / "background" / "3dgs_native").mkdir(parents=True)
+    (run / "background" / "3dgs_native" / "splat_rgb.ply").write_text("ply\n", encoding="utf-8")
+    (run / "video").mkdir()
+    (run / "video" / "3dgs_status.json").write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "inputs": {"pose_world": "arkit"},
+                "claim": {"sim_world_registered": False, "identity_transform_allowed": False},
+            }
+        ),
+        encoding="utf-8",
+    )
+    t_arkit_to_sim = np.asarray(
+        [[1.0, 0.0, 0.0, 0.25], [0.0, 0.0, 1.0, 0.5], [0.0, -1.0, 0.0, 1.25], [0.0, 0.0, 0.0, 1.0]]
+    )
+    t_gs_cam = np.asarray([[1, 0, 0, 0.5], [0, 1, 0, 0.1], [0, 0, 1, 0.2], [0, 0, 0, 1]], dtype=float)
+    t_sim_cam = t_arkit_to_sim @ t_gs_cam
+    (run / "background" / "3dgs_camera_pose.json").write_text(
+        json.dumps(
+            {
+                "anchor_frame": 3,
+                "coordinate_convention": "arkit_world_camera_to_world",
+                "T_3dgs_camera_to_world": t_gs_cam.tolist(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run / "camera.json").write_text(json.dumps({"T_camera_to_world": t_sim_cam.tolist()}), encoding="utf-8")
+    (run / "background" / "phone_sim_alignment.json").write_text(
+        json.dumps(
+            {
+                "status": "passed",
+                "source_backend": "arkit_depth_ransac_plane",
+                "pose_world_before": "arkit",
+                "pose_world_after": "sim",
+                "T_arkit_world_to_sim_world": t_arkit_to_sim.tolist(),
+                "metrics": {"plane_residual_median_m": 0.004, "plane_residual_p90_m": 0.015},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = register_3dgs_background(run, method="camera-sim3", write=True)
+    qa = qa_background_registration(run, heldout_frames=8)
+
+    assert result.data["status"] == "registered"
+    assert np.allclose(np.asarray(result.data["T_3dgs_world_to_sim_world"]), t_arkit_to_sim)
+    assert result.data["transform_sources"]["T_3dgs_world_to_sim_world"] == "phone_sim_alignment_arkit_to_sim_world"
+    assert result.data["registrations"]["3dgs"]["transform_source"] == "phone_sim_alignment_arkit_to_sim_world"
+    assert result.data["scale_source"] == "arkit_sceneDepth_meters"
+    assert result.data["coordinate_bridge"]["status"] == "closed"
+    assert result.data["coordinate_bridge"]["source_world"] == "arkit"
+    assert result.data["coordinate_bridge"]["target_world"] == "sim_world"
+    assert result.data["coordinate_bridge"]["phone_sim_alignment_path"] == "background/phone_sim_alignment.json"
+    assert result.data["metrics"]["phone_alignment_plane_residual_median_m"] == 0.004
+    assert qa["status"] == "passed"
+    assert qa["coordinate_bridge_status"] == "closed"
+    assert qa["visual_registration_status"] == "not_checked"
+
+
+def test_register_3dgs_background_blocks_arkit_world_without_phone_alignment_bridge(tmp_path):
+    from real2sim_scene_foundry.background_registration import qa_background_registration, register_3dgs_background
+
+    run = tmp_path / "run"
+    (run / "background" / "3dgs_native").mkdir(parents=True)
+    (run / "background" / "3dgs_native" / "splat_rgb.ply").write_text("ply\n", encoding="utf-8")
+    (run / "video").mkdir()
+    (run / "video" / "3dgs_status.json").write_text(
+        json.dumps({"status": "completed", "inputs": {"pose_world": "arkit"}}),
+        encoding="utf-8",
+    )
+    t_gs_cam = [[1, 0, 0, 0.5], [0, 1, 0, 0.1], [0, 0, 1, 0.2], [0, 0, 0, 1]]
+    t_sim_cam = [[1, 0, 0, 0.75], [0, 0, 1, 0.7], [0, -1, 0, 1.05], [0, 0, 0, 1]]
+    (run / "background" / "3dgs_camera_pose.json").write_text(
+        json.dumps(
+            {
+                "anchor_frame": 3,
+                "coordinate_convention": "arkit_world_camera_to_world",
+                "T_3dgs_camera_to_world": t_gs_cam,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run / "camera.json").write_text(json.dumps({"T_camera_to_world": t_sim_cam}), encoding="utf-8")
+
+    result = register_3dgs_background(run, method="camera-sim3", write=True)
+    qa = qa_background_registration(run, heldout_frames=8)
+
+    assert result.data["status"] == "blocked_missing_arkit_to_sim_bridge"
+    assert result.data["T_3dgs_world_to_sim_world"] is None
+    assert "missing_phone_sim_alignment_arkit_to_sim_world" in result.data["blocking_reasons"]
+    assert result.data["coordinate_bridge"]["status"] == "blocked"
+    assert result.data["registrations"]["3dgs"]["transform_source"] == "blocked_missing_arkit_to_sim_bridge"
+    assert qa["status"] == "blocked"
+    assert "background_unregistered" in qa["blocking_reasons"]
+
+
+def test_qa_background_registration_blocks_arkit_camera_anchor_bridge_without_closed_coordinate_bridge(tmp_path):
+    from real2sim_scene_foundry.background_registration import qa_background_registration
+
+    run = tmp_path / "run"
+    (run / "background").mkdir(parents=True)
+    (run / "background" / "registration.json").write_text(
+        json.dumps(
+            {
+                "status": "registered",
+                "source_kind": "registered_3dgs",
+                "coordinate_convention": {"3dgs": "arkit_world_camera_to_world", "sim": "z_up_meter_camera_to_world"},
+                "T_3dgs_world_to_sim_world": np.eye(4).tolist(),
+                "transform_sources": {"T_3dgs_world_to_sim_world": "camera_anchor_bridge"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    qa = qa_background_registration(run, heldout_frames=8)
+
+    assert qa["status"] == "blocked"
+    assert qa["coordinate_bridge_status"] == "blocked"
+    assert "arkit_3dgs_coordinate_bridge_not_closed" in qa["blocking_reasons"]
 
 
 def test_register_3dgs_known_phone_sim_world_allows_identity_with_evidence(tmp_path):

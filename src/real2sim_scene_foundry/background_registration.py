@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from PIL import Image
 
 VALID_BACKGROUND_SOURCE_KINDS = {
     "bg_only_cloud",
@@ -17,6 +16,8 @@ VALID_BACKGROUND_SOURCE_KINDS = {
     "full_scene_cloud_debug",
     "3dgs_unavailable",
 }
+ARKIT_TO_SIM_BRIDGE_SOURCE = "phone_sim_alignment_arkit_to_sim_world"
+BLOCKED_ARKIT_TO_SIM_BRIDGE_SOURCE = "blocked_missing_arkit_to_sim_bridge"
 
 
 @dataclass(frozen=True)
@@ -118,6 +119,11 @@ def register_3dgs_background(run_dir: str | Path, *, method: str = "camera-sim3"
     blocking_reasons: list[str] = []
     t_gs_cam = _transform(anchor.get("T_3dgs_camera_to_world") or anchor.get("T_gs_camera_to_world"))
     t_sim_cam = _transform(camera.get("T_camera_to_world") or camera.get("T_sim_camera_to_world"))
+    arkit_trained_3dgs = _is_arkit_3dgs(gs_status, anchor)
+    arkit_bridge_evidence: dict[str, Any] = {}
+    arkit_bridge_reasons: list[str] = []
+    if arkit_trained_3dgs:
+        arkit_bridge_evidence, arkit_bridge_reasons = _phone_alignment_arkit_to_sim_bridge(run)
     if t_gs_cam is None:
         blocking_reasons.append("missing_3dgs_anchor_camera_pose")
     if t_sim_cam is None:
@@ -168,6 +174,118 @@ def register_3dgs_background(run_dir: str | Path, *, method: str = "camera-sim3"
             "gaussian_splat": _gaussian_splat_metadata(gs_status, run, "registered_3dgs", "blocked_missing_camera_pose_scale_evidence"),
             "blocking_reasons": _dedupe(blocking_reasons),
             "blocked_reason": "No shared camera pose and metric scale evidence is available to derive T_3dgs_world_to_sim_world.",
+        }
+        if arkit_trained_3dgs:
+            data["coordinate_bridge"] = _blocked_arkit_coordinate_bridge(arkit_bridge_evidence, arkit_bridge_reasons)
+    elif arkit_trained_3dgs and arkit_bridge_reasons:
+        data = {
+            "version": 1,
+            "source_kind": "registered_3dgs",
+            "status": "blocked_missing_arkit_to_sim_bridge",
+            "method": method,
+            "scale": None,
+            "scale_source": "unknown",
+            "anchor_frame": anchor.get("anchor_frame"),
+            "coordinate_convention": {
+                "3dgs": str(anchor.get("coordinate_convention", "arkit_world_camera_to_world")),
+                "sim": "z_up_meter_camera_to_world",
+            },
+            "coordinate_bridge": _blocked_arkit_coordinate_bridge(arkit_bridge_evidence, arkit_bridge_reasons),
+            "T_bg_only_cloud_to_sim_world": bg_only_transform,
+            "T_3dgs_world_to_sim_world": None,
+            "transforms": {
+                "T_bg_only_cloud_to_sim_world": bg_only_transform,
+                "T_3dgs_world_to_sim_world": None,
+            },
+            "transform_sources": {
+                "T_bg_only_cloud_to_sim_world": "opencv_camera_cloud_to_z_up_world_using_support_height",
+                "T_3dgs_world_to_sim_world": BLOCKED_ARKIT_TO_SIM_BRIDGE_SOURCE,
+            },
+            "registrations": {
+                "bg_only_cloud": {
+                    "status": "registered" if (run / "background" / "bg_only_cloud.ply").is_file() else "missing",
+                    "transform": bg_only_transform,
+                    "transform_source": "opencv_camera_cloud_to_z_up_world_using_support_height",
+                    "scale_source": "input_metric_depth",
+                },
+                "3dgs": {
+                    "status": "blocked_missing_arkit_to_sim_bridge",
+                    "transform": None,
+                    "transform_source": BLOCKED_ARKIT_TO_SIM_BRIDGE_SOURCE,
+                    "scale_source": None,
+                    "blocked_reason": "3DGS was trained in ARKit world, but ARKit world is not closed to sim_world.",
+                },
+            },
+            "assets": {
+                "bg_only_cloud": _rel_if_exists(run, run / "background" / "bg_only_cloud.ply"),
+                "3dgs_native_asset_candidate": _rel_if_exists(run, _native_3dgs_asset_path(run)),
+                "full_scene_cloud_debug": _rel_if_exists(run, run / "scene_cloud.ply"),
+            },
+            "gaussian_splat": _gaussian_splat_metadata(
+                gs_status,
+                run,
+                "registered_3dgs",
+                "blocked_missing_arkit_to_sim_bridge",
+            ),
+            "blocking_reasons": _dedupe(arkit_bridge_reasons),
+            "blocked_reason": "ARKit-trained 3DGS requires background/phone_sim_alignment.json with T_arkit_world_to_sim_world.",
+        }
+    elif arkit_trained_3dgs:
+        transform_list = arkit_bridge_evidence["T_arkit_world_to_sim_world"]
+        anchor_bridge = t_sim_cam @ np.linalg.inv(t_gs_cam)
+        anchor_delta = float(np.max(np.abs(anchor_bridge - np.asarray(transform_list, dtype=np.float64))))
+        bridge_metrics = arkit_bridge_evidence.get("metrics", {}) if isinstance(arkit_bridge_evidence.get("metrics"), dict) else {}
+        data = {
+            "version": 1,
+            "source_kind": "registered_3dgs",
+            "status": "registered",
+            "method": method,
+            "scale": 1.0,
+            "scale_source": "arkit_sceneDepth_meters",
+            "anchor_frame": anchor.get("anchor_frame"),
+            "coordinate_convention": {
+                "3dgs": str(anchor.get("coordinate_convention", "arkit_world_camera_to_world")),
+                "sim": "z_up_meter_camera_to_world",
+            },
+            "coordinate_bridge": _closed_arkit_coordinate_bridge(arkit_bridge_evidence),
+            "metrics": {
+                "anchor_camera_count": 1,
+                "camera_center_rmse_m": 0.0,
+                "camera_anchor_bridge_max_abs_delta": anchor_delta,
+                "phone_alignment_plane_residual_median_m": bridge_metrics.get("plane_residual_median_m"),
+                "phone_alignment_plane_residual_p90_m": bridge_metrics.get("plane_residual_p90_m"),
+            },
+            "T_bg_only_cloud_to_sim_world": bg_only_transform,
+            "T_3dgs_world_to_sim_world": transform_list,
+            "transforms": {
+                "T_bg_only_cloud_to_sim_world": bg_only_transform,
+                "T_3dgs_world_to_sim_world": transform_list,
+            },
+            "transform_sources": {
+                "T_bg_only_cloud_to_sim_world": "opencv_camera_cloud_to_z_up_world_using_support_height",
+                "T_3dgs_world_to_sim_world": ARKIT_TO_SIM_BRIDGE_SOURCE,
+            },
+            "registrations": {
+                "bg_only_cloud": {
+                    "status": "registered" if (run / "background" / "bg_only_cloud.ply").is_file() else "missing",
+                    "transform": bg_only_transform,
+                    "transform_source": "opencv_camera_cloud_to_z_up_world_using_support_height",
+                    "scale_source": "input_metric_depth",
+                },
+                "3dgs": {
+                    "status": "registered",
+                    "transform": transform_list,
+                    "transform_source": ARKIT_TO_SIM_BRIDGE_SOURCE,
+                    "scale_source": "arkit_sceneDepth_meters",
+                    "blocked_reason": None,
+                },
+            },
+            "assets": {
+                "bg_only_cloud": _rel_if_exists(run, run / "background" / "bg_only_cloud.ply"),
+                "3dgs_native_asset_candidate": _rel_if_exists(run, _native_3dgs_asset_path(run)),
+                "full_scene_cloud_debug": _rel_if_exists(run, run / "scene_cloud.ply"),
+            },
+            "gaussian_splat": _gaussian_splat_metadata(gs_status, run, "registered_3dgs", "registered"),
         }
     else:
         transform = t_sim_cam @ np.linalg.inv(t_gs_cam)
@@ -361,17 +479,24 @@ def qa_background_registration(run_dir: str | Path, *, heldout_frames: int = 16)
     transform_source = str((registration.get("transform_sources") or {}).get("T_3dgs_world_to_sim_world") or "")
     if not transform_source or any(marker in transform_source.lower() for marker in ("placeholder", "unknown", "not_available")):
         reasons.append("background_registration_transform_not_evidenced")
+    bridge_contract = _registration_coordinate_bridge_contract(registration)
+    reasons.extend(bridge_contract["blocking_reasons"])
     overlay_path = qa_dir / "background_registration_overlay.png"
-    Image.new("RGB", (2, 2), color=(0, 0, 0)).save(overlay_path)
+    if overlay_path.is_file():
+        overlay_path.unlink()
     report = {
         "version": 1,
         "status": "passed" if not reasons else "blocked",
         "blocking_reasons": _dedupe(reasons),
         "heldout_frames_requested": int(heldout_frames),
         "registration_path": "background/registration.json" if (run / "background" / "registration.json").is_file() else None,
-        "overlay_path": "qa/background_registration_overlay.png",
+        "visual_registration_status": "not_checked",
+        "overlay_status": "placeholder_not_visual_evidence",
+        "overlay_path": None,
         "T_3dgs_world_to_sim_world": registration.get("T_3dgs_world_to_sim_world"),
         "transform_source": transform_source or None,
+        "coordinate_bridge_status": bridge_contract["status"],
+        "coordinate_bridge": bridge_contract,
         "metrics": registration.get("metrics", {}),
     }
     (qa_dir / "background_registration_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
@@ -488,6 +613,98 @@ def _phone_sim_world_identity_evidence(run: Path) -> tuple[dict[str, Any], list[
     if gs_claim.get("identity_transform_allowed") is not True:
         reasons.append("3dgs_identity_training_claim_missing")
     return evidence, reasons
+
+
+def _is_arkit_3dgs(gs_status: dict[str, Any], anchor: dict[str, Any]) -> bool:
+    inputs = gs_status.get("inputs", {}) if isinstance(gs_status.get("inputs"), dict) else {}
+    pose_world = str(inputs.get("pose_world") or "").lower()
+    convention = str(anchor.get("coordinate_convention") or "").lower()
+    return pose_world == "arkit" or "arkit" in convention
+
+
+def _phone_alignment_arkit_to_sim_bridge(run: Path) -> tuple[dict[str, Any], list[str]]:
+    path = run / "background" / "phone_sim_alignment.json"
+    data = _load_json(path)
+    metrics = data.get("metrics", {}) if isinstance(data.get("metrics"), dict) else {}
+    evidence: dict[str, Any] = {
+        "phone_sim_alignment_path": "background/phone_sim_alignment.json",
+        "status": data.get("status"),
+        "source_backend": data.get("source_backend"),
+        "pose_world_before": data.get("pose_world_before"),
+        "pose_world_after": data.get("pose_world_after"),
+        "metrics": metrics,
+        "T_arkit_world_to_sim_world": None,
+    }
+    reasons: list[str] = []
+    if not path.is_file():
+        return evidence, ["missing_phone_sim_alignment_arkit_to_sim_world"]
+    if data.get("status") != "passed":
+        reasons.append("phone_sim_alignment_not_passed")
+    if data.get("source_backend") != "arkit_depth_ransac_plane":
+        reasons.append("phone_sim_alignment_source_backend_not_arkit_depth_ransac_plane")
+    if data.get("pose_world_before") != "arkit":
+        reasons.append("phone_sim_alignment_pose_world_before_not_arkit")
+    if data.get("pose_world_after") not in {"sim", "sim_world"}:
+        reasons.append("phone_sim_alignment_pose_world_after_not_sim")
+    transform = _transform(data.get("T_arkit_world_to_sim_world"))
+    if transform is None:
+        reasons.append("missing_phone_sim_alignment_arkit_to_sim_world")
+    else:
+        evidence["T_arkit_world_to_sim_world"] = transform.tolist()
+    return evidence, _dedupe(reasons)
+
+
+def _closed_arkit_coordinate_bridge(evidence: dict[str, Any]) -> dict[str, Any]:
+    metrics = evidence.get("metrics", {}) if isinstance(evidence.get("metrics"), dict) else {}
+    return {
+        "status": "closed",
+        "source": ARKIT_TO_SIM_BRIDGE_SOURCE,
+        "source_world": "arkit",
+        "target_world": "sim_world",
+        "phone_sim_alignment_path": evidence.get("phone_sim_alignment_path"),
+        "T_arkit_world_to_sim_world": evidence.get("T_arkit_world_to_sim_world"),
+        "phone_alignment_status": evidence.get("status"),
+        "phone_alignment_source_backend": evidence.get("source_backend"),
+        "plane_residual_median_m": metrics.get("plane_residual_median_m"),
+        "plane_residual_p90_m": metrics.get("plane_residual_p90_m"),
+    }
+
+
+def _blocked_arkit_coordinate_bridge(evidence: dict[str, Any], reasons: list[str]) -> dict[str, Any]:
+    return {
+        "status": "blocked",
+        "source": ARKIT_TO_SIM_BRIDGE_SOURCE,
+        "source_world": "arkit",
+        "target_world": "sim_world",
+        "phone_sim_alignment_path": evidence.get("phone_sim_alignment_path", "background/phone_sim_alignment.json"),
+        "phone_alignment_status": evidence.get("status"),
+        "phone_alignment_source_backend": evidence.get("source_backend"),
+        "blocking_reasons": _dedupe(reasons),
+    }
+
+
+def _registration_coordinate_bridge_contract(registration: dict[str, Any]) -> dict[str, Any]:
+    bridge = registration.get("coordinate_bridge") if isinstance(registration.get("coordinate_bridge"), dict) else {}
+    transform_source = str((registration.get("transform_sources") or {}).get("T_3dgs_world_to_sim_world") or "")
+    convention = registration.get("coordinate_convention") if isinstance(registration.get("coordinate_convention"), dict) else {}
+    gs_convention = str(convention.get("3dgs") or "").lower()
+    bridge_source_world = str(bridge.get("source_world") or "").lower()
+    requires_arkit_bridge = "arkit" in gs_convention or bridge_source_world == "arkit"
+    reasons: list[str] = []
+    if requires_arkit_bridge and (
+        bridge.get("status") != "closed" or transform_source != ARKIT_TO_SIM_BRIDGE_SOURCE
+    ):
+        reasons.append("arkit_3dgs_coordinate_bridge_not_closed")
+    return {
+        "status": str(bridge.get("status") or ("blocked" if reasons else "not_required")),
+        "source": bridge.get("source"),
+        "source_world": bridge.get("source_world"),
+        "target_world": bridge.get("target_world"),
+        "requires_arkit_bridge": requires_arkit_bridge,
+        "transform_source": transform_source or None,
+        "phone_sim_alignment_path": bridge.get("phone_sim_alignment_path"),
+        "blocking_reasons": reasons,
+    }
 
 
 def _gaussian_splat_metadata(

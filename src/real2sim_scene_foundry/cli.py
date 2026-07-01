@@ -10,9 +10,12 @@ from PIL import Image
 
 from .background import HTTPInpaintClient
 from .camera import CameraIntrinsics
+from .bg_table import build_table_collision as build_bg_table_collision
+from .bg_table import qa_bg_table
 from .composite_viewer import export_composite_viewer, qa_viewer, serve_composite_viewer
 from .defaults import SAM3D_PROCESS_URL, SAM3_SEGMENT_URL
 from .interactive import export_interactive_scene
+from .nerfstudio_viewer import export_nerfstudio_viewer
 from .pipeline import run_extract, run_reconstruct_align, run_smoke_reconstruction
 from .phone_capture import export_nerfstudio_from_phone_capture, import_phone_capture, validate_phone_capture
 from .phone_sim_alignment import align_phone_sim_world
@@ -146,14 +149,27 @@ def main(argv: list[str] | None = None) -> int:
         print(f"status={report.get('status')}")
         return 0
     if args.command == "composite-viewer":
-        result = export_composite_viewer(args.run_dir, backend=args.backend, show_settled=args.show_settled)
+        if args.mode == "scene":
+            result = export_composite_viewer(args.run_dir, backend=args.backend, show_settled=args.show_settled)
+        else:
+            result = export_composite_viewer(args.run_dir, backend=args.backend, show_settled=args.show_settled, mode=args.mode)
         print(f"wrote {result.index_path}")
         print(f"wrote {result.config_path}")
         url = f"http://{args.host}:{int(args.port)}{result.url_path}"
         print(f"open {url}")
         if args.export_only:
             return 0
-        serve_composite_viewer(args.run_dir, host=args.host, port=args.port, backend=args.backend, show_settled=args.show_settled)
+        if args.mode == "scene":
+            serve_composite_viewer(args.run_dir, host=args.host, port=args.port, backend=args.backend, show_settled=args.show_settled)
+        else:
+            serve_composite_viewer(
+                args.run_dir,
+                host=args.host,
+                port=args.port,
+                backend=args.backend,
+                show_settled=args.show_settled,
+                mode=args.mode,
+            )
         return 0
     if args.command == "qa-viewer":
         report = qa_viewer(args.run_dir)
@@ -269,6 +285,25 @@ def main(argv: list[str] | None = None) -> int:
         print(f"wrote {Path(args.run_dir) / str(output_path)}")
         print(f"status={report.get('status')}")
         return 0
+    if args.command == "nerfstudio-viewer":
+        result = export_nerfstudio_viewer(
+            args.run_dir,
+            config_path=args.config,
+            host=args.host,
+            port=args.port,
+            ns_viewer_bin=args.ns_viewer_bin,
+        )
+        print(f"wrote {result.report_path}")
+        print(f"wrote {result.launch_script_path}")
+        print(f"status={result.report.get('status')}")
+        print(f"open {result.url}")
+        if args.export_only:
+            return 0
+        if result.report.get("status") != "ready":
+            return 4
+        import subprocess
+
+        return subprocess.call(result.command)
     if args.command == "export-manifest":
         manifest_path = write_sim_export_manifest(args.run_dir)
         print(f"wrote {manifest_path}")
@@ -307,6 +342,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "qa-background-registration":
         report = qa_background_registration(args.run_dir, heldout_frames=args.heldout_frames)
         print(f"wrote {Path(args.run_dir) / 'qa' / 'background_registration_report.json'}")
+        print(f"status={report.get('status')}")
+        return 0
+    if args.command == "build-table-collision":
+        result = build_bg_table_collision(args.run_dir, source=args.source, write=args.write, thickness_m=args.height)
+        print(f"wrote {result.mesh_path}")
+        print(f"wrote {result.usd_path}")
+        print(f"wrote {result.report_path}")
+        print(f"status={result.report.get('status')}")
+        return 0
+    if args.command == "qa-bg-table":
+        report = qa_bg_table(args.run_dir, frames=args.frames, write_overlays=args.write_overlays)
+        print(f"wrote {Path(args.run_dir) / 'qa' / 'bg_table_report.json'}")
         print(f"status={report.get('status')}")
         return 0
     if args.command == "export-sim":
@@ -348,6 +395,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_align_phone_sim_world_parser(subparsers)
     _add_import_record3d_parser(subparsers)
     _add_export_nerfstudio_phone_parser(subparsers)
+    _add_nerfstudio_viewer_parser(subparsers)
     _add_export_manifest_parser(subparsers)
     _add_export_sim_parser(subparsers)
     _add_qa_sim_parser(subparsers)
@@ -356,6 +404,8 @@ def build_parser() -> argparse.ArgumentParser:
     _add_render_3dgs_background_parser(subparsers)
     _add_register_3dgs_parser(subparsers)
     _add_qa_background_registration_parser(subparsers)
+    _add_build_table_collision_parser(subparsers)
+    _add_qa_bg_table_parser(subparsers)
     for name in ("export", "render"):
         subparsers.add_parser(name)
     return parser
@@ -441,6 +491,7 @@ def _add_composite_viewer_parser(subparsers: argparse._SubParsersAction) -> None
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7010)
     parser.add_argument("--backend", choices=("external-sidecar", "browser-3dgs"), default="external-sidecar")
+    parser.add_argument("--mode", choices=("scene", "bg-table"), default="scene")
     parser.add_argument("--show-settled", action="store_true")
     parser.add_argument("--export-only", action="store_true")
 
@@ -532,6 +583,16 @@ def _add_export_nerfstudio_phone_parser(subparsers: argparse._SubParsersAction) 
     parser.add_argument("--pose-world", choices=("arkit", "sim"), default="arkit")
 
 
+def _add_nerfstudio_viewer_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser("nerfstudio-viewer")
+    parser.add_argument("--run-dir", required=True, type=Path)
+    parser.add_argument("--config", default=None, type=Path, help="Nerfstudio config.yml to load; resolved from run QA reports when omitted")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=7014)
+    parser.add_argument("--ns-viewer-bin", default=None, type=Path)
+    parser.add_argument("--export-only", action="store_true", help="Write report/launcher without starting ns-viewer")
+
+
 def _add_export_manifest_parser(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser("export-manifest")
     parser.add_argument("--run-dir", required=True, type=Path)
@@ -586,6 +647,21 @@ def _add_qa_background_registration_parser(subparsers: argparse._SubParsersActio
     parser = subparsers.add_parser("qa-background-registration")
     parser.add_argument("--run-dir", required=True, type=Path)
     parser.add_argument("--heldout-frames", type=int, default=16)
+
+
+def _add_build_table_collision_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser("build-table-collision")
+    parser.add_argument("--run-dir", required=True, type=Path)
+    parser.add_argument("--source", default="background/table_polygon_world.json")
+    parser.add_argument("--height", type=float, default=0.03)
+    parser.add_argument("--write", action="store_true")
+
+
+def _add_qa_bg_table_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser("qa-bg-table")
+    parser.add_argument("--run-dir", required=True, type=Path)
+    parser.add_argument("--frames", default="0,20,40,60")
+    parser.add_argument("--write-overlays", action="store_true")
 
 
 def _add_stereo_args(parser: argparse.ArgumentParser) -> None:
