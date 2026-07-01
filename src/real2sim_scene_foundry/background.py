@@ -12,6 +12,8 @@ import numpy as np
 import requests
 from PIL import Image
 
+from .background_registration import write_background_registration
+
 
 class ArrayInpaintClient(Protocol):
     backend_name: str
@@ -89,6 +91,12 @@ def create_background_artifacts(
     Image.fromarray(np.asarray(bg_only, dtype=np.uint8)).save(bg_only_path)
     bg_point_count = _write_point_cloud_ply(bg_only_cloud_path, xyz, bg_only, mask=~foreground_mask)
 
+    registration = write_background_registration(
+        run,
+        source_kind="bg_only_cloud",
+        status="registered_bg_only_cloud",
+        scale_source="input_metric_depth",
+    )
     manifest = {
         "version": 1,
         "stage": "background",
@@ -97,6 +105,8 @@ def create_background_artifacts(
         "foreground_mask": str(foreground_mask_path.relative_to(run)),
         "bg_only_image": str(bg_only_path.relative_to(run)),
         "bg_only_cloud": str(bg_only_cloud_path.relative_to(run)),
+        "registration_path": str(registration.path.relative_to(run)),
+        "registration_status": registration.data["status"],
         "foreground_coverage_px": int(np.count_nonzero(foreground_mask)),
         "background_point_count": int(bg_point_count),
         "background_3dgs": {
@@ -144,6 +154,7 @@ def _attach_background_to_extraction(
         "foreground_mask": background_manifest["foreground_mask"],
         "bg_only_image": background_manifest["bg_only_image"],
         "bg_only_cloud": background_manifest["bg_only_cloud"],
+        "registration_path": background_manifest["registration_path"],
         "source_backend": background_manifest["source_backend"],
         "background_3dgs": background_manifest["background_3dgs"],
     }

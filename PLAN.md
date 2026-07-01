@@ -2,6 +2,9 @@
 
 ## Summary
 - 工作线：**项目落地先行、论文后置**。目标不是只做 object mesh，而是复现 SimFoundry 图示主链路：真实双目/视频输入 -> extraction -> foreground removal -> object digital twins -> background reconstruction -> automatic alignment -> 可交互 sim scene。
+- M10+ 完整 simulator export 复现计划已单独写入 `docs/superpowers/plans/2026-06-30-simfoundry-simulator-export-reproduction.md`。后续不再以 fallback、服务 smoke 或最小单测作为目标，而以 artifact-level 的 Genesis/USD/Isaac export 和 QA 报告作为验收口径。
+- 当前状态（2026-07-01）：object visual path 已完成；B 路线已接通：外部 Nerfstudio 3DGS renderer 输出 `qa/background_3dgs_render.png`，`sim_export_manifest.json` 为 `status=passed`，`qa/sim_export_report.json` 为 `overall_status=passed`。
+- Isaac worker bridge 已有 canonical loaded report 并被 `export-sim --backend isaac` 保留为验证证据。注意：Isaac/Genesis 仍未原生渲染 3DGS；当前通过的是 `external_3dgs_renderer` sidecar 视觉背景路线，manifest 中写明 `simulator_native=false`。
 - 论文依据：SimFoundry 将流程拆成 Extraction、Generation、Augmentation 三段，从单个真实视频重建 sim-ready digital twin，并可扩展 object/scene/task cousins。参考：[arXiv 2606.28276](https://arxiv.org/abs/2606.28276)、[NVIDIA SimFoundry page](https://research.nvidia.com/labs/gear/simfoundry/)。
 - 新项目位置：服务器 `wenqian_h200`，代码统一放在 `/mnt/workspace/wenqian/real2sim_scene_foundry`。不改 `ego_hand_pipeline`、`ego_eef`、`knowin-world` 现有仓库。
 - 当前成功标准：输入真实双目图片，输出 object mesh、metric pose/scale、物理参数、background artifacts、USD/manifest、Genesis/Isaac 可交互入口，以及 render-vs-input overlay / interaction report。输入视频或多帧时，再启用 BG-only video -> 3DGS 背景训练。
@@ -11,7 +14,7 @@
 - RGB 视频入口：`rsf video-prep --video phone.mp4 --out runs/<id> --frame-stride 10`，先输出 sampled frames、reference frame 和 `video_manifest.json`；相机位姿和 3DGS 训练是后续步骤。
 - 服务适配器：
   - SAM3：`http://101.132.143.105:5081/segment`
-  - SAM3D：`http://101.132.143.105:5077/api/process`
+  - SAM3D：当前未登记可用 HTTP endpoint；除非当前服务注册表显式给出，否则不要调用任何假定的 SAM3D HTTP 地址。
   - MoGe focal：`http://101.132.143.105:5014/api/focal`
   - S2M2：`http://10.10.4.244:5060-5067/api/process`
   - Gemini：通过环境变量读取 API key；无 key 时允许 YAML 手写 object list。
@@ -47,6 +50,8 @@
   - 动态物体先跑短 physics settle，检查穿透、飞出、NaN。
 - Phase 5：Render + QA
   - 默认用 Genesis 渲染 smoke preview；USD/manifest 保持 Isaac-compatible，后续接 IsaacLab loader。
+  - Isaac 验证 worker：`ssh -p 1024 root@101.132.143.105`，运行时入口 `/isaac-sim/python.sh`；用于真实打开 exported USD 并写回 `qa/isaac_load_report.json`。
+  - 2026-07-01：`wenqian_h200` 直连 1024 worker 目前缺少可用 SSH 凭据；本次通过本地桥接传输最小 bundle、远端运行 Isaac、再写回 canonical QA report。`export-sim --backend isaac` 会保留已有 loaded worker report，避免重跑 export 时把证据降级成 `runtime_unavailable`。
   - 生成 overlay：原图、SAM3 mask、投影 mesh 轮廓、渲染图并排。
   - `qa_report.json` 作为 go/no-go：服务版本、输入 hash、object 数、alignment metrics、physics settle 状态。
 - Phase 6：Background 3DGS
@@ -59,7 +64,7 @@
 
 ## Current Gap to Full Stereo-to-Interactive Scene
 
-当前项目已经有独立 package、Qwen-before-SAM extraction、双目 XYZ、点云落盘、SAM3D object asset、metric alignment、manifest、USD stub、背景 inpaint artifacts 和 Genesis interactive launcher。它仍不是论文最终完整版；距离“图示完整复现 + 可交互场景”还缺真正视频 3DGS 背景训练、真实 Genesis/Isaac settle 运行结果、以及更稳的 support plane / collision proxy。
+当前项目已经有独立 package、Qwen-before-SAM extraction、双目 XYZ、点云落盘、SAM3D-derived object visual path、metric alignment、manifest、USD/export bundle、背景 inpaint artifacts、3DGS 训练产物、外部 3DGS 背景渲染和 Genesis/Isaac export launcher。它仍不是论文最终完整版：Genesis/Isaac native 3DGS runtime 未集成，Isaac worker 仍依赖本地桥接回传报告；但当前接受的 B 路线已让 canonical run 在 manifest/QA 层通过，且不再把 `bg_only_cloud.ply` 当最终视觉背景。
 
 1. **Extraction artifacts**
    - 保存 representative RGB、calibration、S2M2 metric `XYZ`、整场景点云 `scene_cloud.ply`、每个物体 mask/crop/object cloud。
@@ -102,6 +107,7 @@
 7. **M7 Video 3DGS background**：已支持视频/多帧输入、COLMAP camera trajectory、MoGe dense reference geometry、Qwen/SAM 前景移除和 BG-only frame set；3DGS runner 已接入，训练依赖独立放在 `.venv_3dgs`，输出 splat 资产和 `3dgs_status.json`。
 8. **M8 Video object scene composition**：用 MoGe reference frame + `points.exr` 作为 metric RGB-D 输入，复用 Qwen/SAM3/SAM3D/alignment 生成前景 object digital twins，并把 video 3DGS 背景引用写入同一个 `scene_manifest.json`。
 9. **M9 Support plane + physics QA**：从背景点云估计支撑平面，修正 z-up world frame，真实 Genesis/Isaac settle 100 steps 并写回 QA。
+10. **M10 Simulator export gate**：当前 gate 正确返回 blocked；下一步不是补 side artifact，而是解决背景 native runtime / BG-only proxy 与 Isaac worker bridge 可重复性，直到 `sim_export_manifest.json` 和 `qa/sim_export_report.json` 都给出 passed。
 
 ## Test Plan
 - Unit tests：
@@ -120,6 +126,6 @@
 
 ## Assumptions
 - 用户已明确要求完整复现图示主流程；当前不再把 automatic background 分支排除在外，但单帧双目输入只能产 proxy background，真正 3DGS 需要视频/多帧。
-- SAM3D `:5077` 已知几何可用但 pose/scale 投影有偏差，V1 把“对齐修正”作为核心任务。
+- SAM3D 物体几何服务当前没有项目内确认 endpoint；V1 仍把“对齐修正”作为核心任务，不能把外部服务原始 pose/scale 当 metric truth。
 - 服务器 `1023` 理解为 SSH 入口 `wenqian_h200`；所有持久代码都在 `/mnt/workspace/wenqian` 下。
 - 现有仓库 dirty state 不碰；新项目通过服务 API 和渲染脚本复用能力，不直接迁移旧仓库代码。

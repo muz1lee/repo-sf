@@ -25,6 +25,10 @@ class SceneObject:
     confidence: float
     source_backend: str = "unknown"
     needs_manual_refine: bool = False
+    visual_asset: dict[str, Any] | None = None
+    collision_asset: dict[str, Any] | None = None
+    debug_proxy: dict[str, Any] | None = None
+    physics: dict[str, Any] | None = None
 
     def validate(self) -> None:
         if not self.object_id:
@@ -41,9 +45,13 @@ class SceneObject:
             raise ValueError(f"{self.object_id}: confidence must be in [0, 1]")
         _validate_transform(self.T_object_to_camera, f"{self.object_id}: T_object_to_camera")
         _validate_transform(self.T_object_to_world, f"{self.object_id}: T_object_to_world")
+        _validate_asset_record(self.visual_asset, f"{self.object_id}: visual_asset")
+        _validate_asset_record(self.collision_asset, f"{self.object_id}: collision_asset")
+        _validate_asset_record(self.debug_proxy, f"{self.object_id}: debug_proxy")
+        _validate_asset_record(self.physics, f"{self.object_id}: physics")
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {key: value for key, value in asdict(self).items() if value is not None}
 
 
 @dataclass(frozen=True)
@@ -113,3 +121,19 @@ def _validate_transform(value: list[list[float]], context: str) -> None:
         for item in row:
             if not isinstance(item, (int, float)):
                 raise ValueError(f"{context} entries must be numeric")
+
+
+def _validate_asset_record(value: dict[str, Any] | None, context: str) -> None:
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        raise ValueError(f"{context} must be a mapping")
+    path = value.get("path")
+    if path is not None and not isinstance(path, str):
+        raise ValueError(f"{context}.path must be a string")
+    source = value.get("source")
+    if source is not None and not isinstance(source, str):
+        raise ValueError(f"{context}.source must be a string")
+    status = value.get("status")
+    if status is not None and not isinstance(status, str):
+        raise ValueError(f"{context}.status must be a string")

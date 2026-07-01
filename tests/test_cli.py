@@ -244,6 +244,76 @@ def test_cli_support_plane_updates_existing_scene(tmp_path):
     assert manifest["objects"][0]["T_object_to_world"][2][3] == pytest.approx(0.1)
 
 
+def test_cli_export_manifest_writes_manifest_json(tmp_path, monkeypatch, capsys):
+    run = tmp_path / "run"
+    run.mkdir()
+    calls = []
+
+    def fake_write(run_dir):  # noqa: ANN001
+        calls.append(run_dir)
+        path = run_dir / "sim_export_manifest.json"
+        path.write_text('{"status":"passed"}', encoding="utf-8")
+        return path
+
+    def fake_build(run_dir):  # noqa: ANN001
+        return run_dir / "not_written_manifest_repr.json"
+
+    monkeypatch.setattr("real2sim_scene_foundry.cli.write_sim_export_manifest", fake_write, raising=False)
+    monkeypatch.setattr("real2sim_scene_foundry.cli.build_sim_export_manifest", fake_build)
+
+    code = main(["export-manifest", "--run-dir", str(run)])
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert calls == [run]
+    assert (run / "sim_export_manifest.json").is_file()
+    assert f"wrote {run / 'sim_export_manifest.json'}" in captured.out
+
+
+def test_cli_render_3dgs_background_calls_external_renderer(tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    run.mkdir()
+    calls = []
+
+    class Result:
+        report_path = run / "qa" / "background_3dgs_render_report.json"
+        report = {"status": "rendered"}
+
+    def fake_render(run_dir, **kwargs):  # noqa: ANN001
+        calls.append((run_dir, kwargs))
+        return Result()
+
+    monkeypatch.setattr("real2sim_scene_foundry.cli.render_external_3dgs_background", fake_render)
+
+    code = main(["render-3dgs-background", "--run-dir", str(run), "--split", "test", "--camera-idx", "0"])
+
+    assert code == 0
+    assert calls == [(run, {"split": "test", "camera_idx": 0})]
+
+
+def test_cli_runtime_viewer_exports_genesis_runtime_bridge(tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    run.mkdir()
+    seen = []
+
+    class Result:
+        index_path = run / "exports" / "runtime_viewer" / "index.html"
+        runtime_manifest_path = run / "exports" / "runtime_viewer" / "runtime_manifest.json"
+        script_path = run / "exports" / "genesis_runtime_server.py"
+        report = {"status": "runtime_script_written", "backend": "genesis"}
+
+    def fake_export(run_dir, *, backend):  # noqa: ANN001
+        seen.append((run_dir, backend))
+        return Result()
+
+    monkeypatch.setattr("real2sim_scene_foundry.cli.export_runtime_viewer", fake_export)
+
+    code = main(["runtime-viewer", "--run-dir", str(run), "--backend", "genesis", "--port", "7031"])
+
+    assert code == 0
+    assert seen == [(run, "genesis")]
+
+
 def test_cli_extract_passes_http_inpaint_client(tmp_path, monkeypatch):
     left = tmp_path / "left.png"
     right = tmp_path / "right.png"

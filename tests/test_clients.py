@@ -1,3 +1,4 @@
+import base64
 import io
 
 import numpy as np
@@ -5,7 +6,14 @@ import pytest
 from PIL import Image
 
 from real2sim_scene_foundry.camera import CameraIntrinsics
-from real2sim_scene_foundry.clients import MoGeClient, S2M2Client, SAM3Client, SAM3DClient, decode_sam3_mask
+from real2sim_scene_foundry.clients import (
+    MoGeClient,
+    S2M2Client,
+    SAM3Client,
+    SAM3DClient,
+    SAM3DMeshJobClient,
+    decode_sam3_mask,
+)
 
 
 class DummyResponse:
@@ -77,8 +85,6 @@ def test_sam3_client_sends_text_prompt(monkeypatch, tmp_path):
     mask = Image.new("L", (2, 2), color=255)
     buf = io.BytesIO()
     mask.save(buf, format="PNG")
-    import base64
-
     payload = {"success": True, "detections": [{"mask": base64.b64encode(buf.getvalue()).decode("ascii")}]}
     requests_seen = []
 
@@ -102,8 +108,6 @@ def test_sam3d_client_posts_service_contract_and_writes_base64_mesh(monkeypatch,
     out = tmp_path / "sam3d"
     Image.new("RGB", (2, 2)).save(image)
     Image.new("L", (2, 2), color=255).save(mask)
-    import base64
-
     payload = {
         "success": True,
         "mesh_glb_base64": base64.b64encode(b"glb-bytes").decode("ascii"),
@@ -124,12 +128,10 @@ def test_sam3d_client_posts_service_contract_and_writes_base64_mesh(monkeypatch,
     assert result.metadata["T_model_to_camera"][2][3] == 1
 
 
-def test_sam3d_client_converts_ply_camera_response_to_proxy_mesh(monkeypatch, tmp_path):
+def test_sam3d_client_writes_ply_camera_response_without_visual_mesh(monkeypatch, tmp_path):
     image = tmp_path / "frame.png"
     out = tmp_path / "sam3d"
     Image.new("RGB", (2, 2)).save(image)
-    import base64
-
     ply = b"""ply
 format ascii 1.0
 element vertex 4
@@ -151,6 +153,81 @@ end_header
 
     result = SAM3DClient("http://sam3d/api/process").process(image, text_prompt="cup", out_dir=out)
 
+    assert result.mesh_path is None
+    assert result.point_cloud_path == out / "point_cloud.ply"
+    assert result.debug_bbox_path == out / "debug_bbox.glb"
     assert (out / "point_cloud.ply").read_bytes() == ply
-    assert result.mesh_path.name == "mesh.glb"
-    assert result.mesh_path.stat().st_size > 0
+    assert (out / "debug_bbox.glb").stat().st_size > 0
+    assert not (out / "mesh.glb").exists()
+
+
+def test_sam3d_mesh_job_client_posts_rgba_mask_job_and_downloads_glb(monkeypatch, tmp_path):
+    image = tmp_path / "crop.png"
+    mask = tmp_path / "mask.png"
+    out = tmp_path / "sam3d"
+    Image.new("RGB", (2, 2), color=(10, 20, 30)).save(image)
+    full_mask = Image.new("L", (4, 4), color=0)
+    full_mask.putpixel((1, 1), 255)
+    full_mask.putpixel((2, 1), 0)
+    full_mask.putpixel((1, 2), 0)
+    full_mask.putpixel((2, 2), 255)
+    full_mask.save(mask)
+    calls = []
+
+    def fake_post(url, files, data, timeout):
+        front_name, front_file, front_type = files["front"]
+        mask_name, mask_file, mask_type = files["mask"]
+        front = Image.open(io.BytesIO(front_file.read())).convert("RGBA")
+        uploaded_mask = Image.open(io.BytesIO(mask_file.read())).convert("L")
+        calls.append(
+            {
+                "url": url,
+                "data": dict(data),
+                "timeout": timeout,
+                "front_name": front_name,
+                "front_type": front_type,
+                "mask_name": mask_name,
+                "mask_type": mask_type,
+                "front_alpha": list(front.getchannel("A").getdata()),
+                "mask_pixels": list(uploaded_mask.getdata()),
+            }
+        )
+        return DummyResponse(json_data={"job_id": "job-123"})
+
+    statuses = [{"status": "running", "message": "loading"}, {"status": "done", "message": "done"}]
+
+    def fake_get(url, timeout):
+        if url == "http://mesh/api/jobs/job-123":
+            return DummyResponse(json_data={"job_id": "job-123", **statuses.pop(0)})
+        if url == "http://mesh/download/job-123":
+            return DummyResponse(content=b"downloaded-glb")
+        raise AssertionError(url)
+
+    monkeypatch.setattr("real2sim_scene_foundry.clients.requests.post", fake_post)
+    monkeypatch.setattr("real2sim_scene_foundry.clients.requests.get", fake_get)
+
+    result = SAM3DMeshJobClient("http://mesh", timeout_s=9.0, poll_interval_s=0.0).process(
+        image,
+        mask_path=mask,
+        text_prompt="cup",
+        out_dir=out,
+    )
+
+    assert calls == [
+        {
+            "url": "http://mesh/api/jobs",
+            "data": {"seed": "12345", "alpha_threshold": "127", "generate_texture": "false"},
+            "timeout": 9.0,
+            "front_name": "front.png",
+            "front_type": "image/png",
+            "mask_name": "mask.png",
+            "mask_type": "image/png",
+            "front_alpha": [255, 0, 0, 255],
+            "mask_pixels": [255, 0, 0, 255],
+        }
+    ]
+    assert result.mesh_path == out / "mesh.glb"
+    assert result.mesh_path.read_bytes() == b"downloaded-glb"
+    assert result.mesh_source_key == "download_glb"
+    assert result.metadata["mesh_job"]["job_id"] == "job-123"
+    assert result.metadata["mesh_job"]["status"] == "done"

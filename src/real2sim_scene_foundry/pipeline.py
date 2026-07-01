@@ -20,6 +20,7 @@ from .camera import CameraIntrinsics
 from .clients import S2M2Client, SAM3Client, SAM3DClient
 from .defaults import S2M2_URLS, SAM3_SEGMENT_URL, SAM3D_PROCESS_URL
 from .manifest import SceneBackground, SceneManifest, SceneObject
+from .visual_assets import build_visual_asset_report, plan_sam3d_visual_assets, write_visual_asset_report
 from .proposals import ObjectProposal
 
 
@@ -253,32 +254,50 @@ def run_reconstruct_align(
             break
         else:
             raise RuntimeError(f"{object_id}: SAM3D failed for all prompt candidates: {sam3d_errors}")
-        raw_mesh_path = sam3d_dir / "raw_mesh.glb"
-        result_mesh_path = Path(sam3d_result.mesh_path)
-        if result_mesh_path.exists() and result_mesh_path != raw_mesh_path:
-            shutil.copyfile(result_mesh_path, raw_mesh_path)
-        elif not raw_mesh_path.exists():
-            raw_mesh_path.write_bytes(result_mesh_path.read_bytes() if result_mesh_path.exists() else b"")
         (sam3d_dir / "sam3d_metadata.json").write_text(json.dumps(sam3d_result.metadata, indent=2), encoding="utf-8")
+        visual_plan = plan_sam3d_visual_assets(
+            object_id=object_id,
+            label=str(item["label"]),
+            object_dir=object_dir,
+            sam3d_result=sam3d_result,
+            run_dir=out,
+        )
 
-        aligned_mesh_path = object_dir / "mesh_aligned.glb"
-        align = _align_mesh_to_object_cloud(raw_mesh_path, object_points, camera, mask, aligned_mesh_path)
+        alignment_source_path = visual_plan.alignment_source_path
+        raw_mesh_path: Path | None = None
+        if visual_plan.final_visual:
+            raw_mesh_path = sam3d_dir / "raw_mesh.glb"
+            if alignment_source_path != raw_mesh_path:
+                shutil.copyfile(alignment_source_path, raw_mesh_path)
+            alignment_source_path = raw_mesh_path
+
+        aligned_mesh_path = visual_plan.aligned_output_path
+        align = _align_mesh_to_object_cloud(alignment_source_path, object_points, camera, mask, aligned_mesh_path)
+        visual_report = build_visual_asset_report(visual_plan, run_dir=out, alignment=align)
+        write_visual_asset_report(object_dir / "visual_asset_report.json", visual_report)
+        mesh_path = Path(visual_report["visual_asset"]["path"])
+        source_backend = visual_plan.source_backend
         T_object_to_camera = align["T_model_to_camera"]
         T_object_to_world = _camera_to_world_transform(np.asarray(T_object_to_camera, dtype=np.float64))
         needs_manual_refine = bool(
-            align["center_error_px"] > 30.0 or (align["bbox_iou"] < 0.4 and align["center_error_px"] > 10.0)
+            (not visual_plan.final_visual)
+            or align["center_error_px"] > 30.0
+            or (align["bbox_iou"] < 0.4 and align["center_error_px"] > 10.0)
         )
         pose = {
             "object_id": object_id,
             "label": item["label"],
             "T_object_to_camera": T_object_to_camera,
             "T_object_to_world": T_object_to_world.tolist(),
-            "raw_sam3d_mesh_path": str(raw_mesh_path.relative_to(out)),
-            "mesh_path": str(aligned_mesh_path.relative_to(out)),
-            "source_backend": "sam3d_aligned",
+            "raw_sam3d_mesh_path": str(raw_mesh_path.relative_to(out)) if raw_mesh_path is not None else None,
+            "mesh_path": mesh_path.as_posix(),
+            "alignment_mesh_path": str(aligned_mesh_path.relative_to(out)),
+            "debug_proxy_path": visual_report["debug_proxy"]["path"] if visual_report.get("debug_proxy") else None,
+            "source_backend": source_backend,
             "sam3d_text_prompt": sam3d_prompt,
             "sam3d_image_path": str(sam3d_image_path.relative_to(out)),
             "alignment": align,
+            "visual_asset": visual_report,
             "sam3d_metadata": _summarize_sam3d_metadata(sam3d_result.metadata),
         }
         (object_dir / "pose.json").write_text(json.dumps(pose, indent=2), encoding="utf-8")
@@ -287,7 +306,7 @@ def run_reconstruct_align(
             SceneObject(
                 object_id=object_id,
                 label=item["label"],
-                mesh_path=str(aligned_mesh_path.relative_to(out)),
+                mesh_path=mesh_path.as_posix(),
                 mask_path=item["mask_path"],
                 crop_path=item["crop_path"],
                 T_object_to_camera=T_object_to_camera,
@@ -296,16 +315,22 @@ def run_reconstruct_align(
                 mass_kg=float(item.get("mass_kg", 0.25)),
                 friction=float(item.get("friction", 0.8)),
                 confidence=float(min(1.0, item.get("valid_xyz_ratio", 1.0))),
-                source_backend="sam3d_aligned",
+                source_backend=source_backend,
                 needs_manual_refine=needs_manual_refine,
+                visual_asset=visual_report["visual_asset"],
+                debug_proxy=visual_report["debug_proxy"],
             )
         )
         qa_objects.append(
             {
                 "object_id": object_id,
                 "label": item["label"],
-                "source_backend": "sam3d_aligned",
+                "source_backend": source_backend,
                 "alignment_backend": "sam3d_bbox_similarity",
+                "visual_asset_status": visual_report["status"],
+                "visual_asset_final": bool(visual_report["visual_asset"]["final_visual"]),
+                "visual_asset_path": visual_report["visual_asset"]["path"],
+                "debug_proxy_path": visual_report["debug_proxy"]["path"] if visual_report.get("debug_proxy") else None,
                 "mask_iou": float(align["bbox_iou"]),
                 "center_error_px": float(align["center_error_px"]),
                 "depth_residual_m": float(align["depth_residual_m"]),

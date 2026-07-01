@@ -1,5 +1,9 @@
 # AGENTS.md - real2sim_scene_foundry
 
+## 新对话启动入口
+
+任何新的 AI/Codex 对话接手本项目时，必须先读同目录下的 `AI_START_HERE.md`，再继续读本文件和当前执行计划。不要依赖聊天历史记忆；服务器、路径、API、当前目标、禁止项和 canonical run 状态都以 `AI_START_HERE.md` 为启动事实。
+
 本文件是 `real2sim_scene_foundry` 的项目级规则。任何 agent 在本项目继续写代码、跑脚本、同步服务器或生成产物前，必须先读本文件。若用户当前明确指令与本文冲突，以用户当前明确指令为准；若涉及其他仓库，还必须先读对方仓库自己的 `AGENTS.md`。
 
 ## 项目定位
@@ -49,14 +53,17 @@ python -m pip install -e '.[dev]'
 | 计算服务器 | `ssh wenqian_h200` | 主要开发与运行环境 | 4 x NVIDIA L20X |
 | 持久工作区 | `/mnt/workspace/wenqian/` | 所有本项目持久文件 | `/tmp` 易失 |
 | SAM3 segmentation | `http://101.132.143.105:5081/segment` | object mask / text prompt / box prompt | 根路径 404 不代表 `/segment` 不可用 |
-| SAM3D object | `http://101.132.143.105:5077/api/process` | 单图物体几何、初始 pose/scale | 已知 pose 投影可能偏，需要本项目做对齐修正 |
+| SAM3D object | 未登记可用 HTTP endpoint | 单图物体几何、初始 pose/scale | 当前项目没有确认的 SAM3D HTTP endpoint；如需 SAM3D，先向用户确认真实服务入口或从当前运行记录查证。 |
 | MoGe focal | `http://101.132.143.105:5014/api/focal` | 单目 RGB 的 focal / K 估计 | local health path: `http://localhost:5014/healthz` |
 | HaWoR | `http://101.132.143.105:5012/api/recon` | 手部重建参考，不属于本项目 V1 主线 | local health path: `http://localhost:5012/healthz` |
 | S2M2 stereo depth | `http://10.10.4.244:5060-5067/api/process` | 双目 metric XYZ map | 只在服务器侧可达；本地 Mac 不通 |
 | scene-edit inpaint | `http://101.132.143.105:5091/inpaint` / `:5092/inpaint` | foreground removal / BG-only RGB | 可用时走 HTTP；不可用时本项目用 OpenCV inpaint fallback |
 | SAM3D weights | `/mnt/workspace/SAM3D/object/checkpoints` | 服务端模型资产 | 不要移动 |
 | knowin-world render env | `/mnt/workspace/wenqian/knowin-world/.venv/bin/python` | Genesis/USD 渲染 | 不作为本项目依赖环境 |
+| Isaac worker | `ssh -p 1024 root@101.132.143.105` + `/isaac-sim/python.sh` | Isaac/Omniverse USD load verification | 运行目录需从 `wenqian_h200` 传到 worker；持久代码仍只放本项目权威目录 |
 | scene edit smoke data | `/mnt/workspace/wenqian/scene_edit_v0/test_data` | V1 双目 smoke 输入 | 可只读复用 |
+
+2026-07-01 连接边界：当前 `wenqian_h200` 不能直接免密登录 1024 Isaac worker（`Permission denied (publickey,password)`）；已通过本地 SSH 桥接把最小 run bundle 从 `wenqian_h200` 传到 worker，执行 `/isaac-sim/python.sh` 后再把 `qa/isaac_load_report.json` 写回权威 run。
 
 ## 工程纪律
 

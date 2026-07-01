@@ -73,8 +73,13 @@ def test_create_background_artifacts_unions_masks_and_writes_bg_only_cloud(tmp_p
     assert fg.sum() == 4
     assert (bg[fg] == np.array([9, 8, 7], dtype=np.uint8)).all()
     assert "element vertex 16" in result.bg_only_cloud_path.read_text(encoding="utf-8")
+    registration = json.loads((run / "background" / "registration.json").read_text(encoding="utf-8"))
+    assert registration["source_kind"] == "bg_only_cloud"
+    assert registration["status"] == "registered_bg_only_cloud"
+    assert registration["scale_source"] == "input_metric_depth"
     data = json.loads(result.manifest_path.read_text(encoding="utf-8"))
     assert data["stage"] == "background"
+    assert data["registration_path"] == "background/registration.json"
     assert data["inpaint_backend"] == "fill-test"
     assert data["background_3dgs"]["status"] == "requires_video_or_multiview"
 

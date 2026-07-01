@@ -14,7 +14,9 @@ from .composite_viewer import export_composite_viewer, serve_composite_viewer
 from .defaults import SAM3D_PROCESS_URL, SAM3_SEGMENT_URL
 from .interactive import export_interactive_scene
 from .pipeline import run_extract, run_reconstruct_align, run_smoke_reconstruction
+from .pose_refinement import apply_visual_orientation_overrides, refine_visual_pose_to_masks, snap_object_poses_to_support
 from .proposals import ObjectProposal, QwenProposalClient, load_object_proposals
+from .runtime_viewer import export_runtime_viewer
 from .support_plane import estimate_and_apply_support_plane
 from .video import prepare_rgb_video
 from .video_scene import run_video_reference_scene
@@ -110,6 +112,20 @@ def main(argv: list[str] | None = None) -> int:
         print(f"support_plane status={report['status']} source={report['source_backend']}")
         print(f"wrote {Path(args.run_dir) / 'scene_manifest.json'}")
         return 0
+    if args.command == "refine-pose":
+        if args.orientation_override:
+            result = apply_visual_orientation_overrides(
+                args.run_dir,
+                _parse_orientation_overrides(args.orientation_override),
+                tolerance_m=args.tolerance_m,
+            )
+        elif args.visual_bbox:
+            result = refine_visual_pose_to_masks(args.run_dir, tolerance_m=args.tolerance_m)
+        else:
+            result = snap_object_poses_to_support(args.run_dir, tolerance_m=args.tolerance_m)
+        print(f"pose_refinement status={result.report['status']}")
+        print(f"wrote {result.report_path}")
+        return 0
     if args.command == "composite-viewer":
         result = export_composite_viewer(args.run_dir)
         print(f"wrote {result.index_path}")
@@ -119,6 +135,32 @@ def main(argv: list[str] | None = None) -> int:
         if args.export_only:
             return 0
         serve_composite_viewer(args.run_dir, host=args.host, port=args.port)
+        return 0
+    if args.command == "runtime-viewer":
+        result = export_runtime_viewer(args.run_dir, backend=args.backend)
+        print(f"runtime_viewer status={result.report['status']} backend={result.report['backend']}")
+        print(f"wrote {result.index_path}")
+        print(f"wrote {result.runtime_manifest_path}")
+        if result.script_path:
+            print(f"wrote {result.script_path}")
+            print(f"run: /mnt/workspace/wenqian/knowin-world/.venv/bin/python {result.script_path} --run-dir {args.run_dir} --host {args.host} --port {int(args.port)}")
+        if args.serve:
+            if result.script_path is None:
+                raise RuntimeError(f"runtime viewer backend {args.backend!r} is unavailable: {result.report.get('blocked_reason')}")
+            import subprocess
+
+            return subprocess.call(
+                [
+                    "/mnt/workspace/wenqian/knowin-world/.venv/bin/python",
+                    str(result.script_path),
+                    "--run-dir",
+                    str(args.run_dir),
+                    "--host",
+                    str(args.host),
+                    "--port",
+                    str(int(args.port)),
+                ]
+            )
         return 0
     if args.command == "video-prep":
         result = prepare_rgb_video(
@@ -151,6 +193,45 @@ def main(argv: list[str] | None = None) -> int:
         print(f"wrote {result.interactive_script_path}")
         print(f"wrote {result.interaction_report_path}")
         return 0
+    if args.command == "export-manifest":
+        manifest_path = write_sim_export_manifest(args.run_dir)
+        print(f"wrote {manifest_path}")
+        return 0
+    if args.command == "isaac-worker-bundle":
+        bundle = build_isaac_worker_bundle(
+            args.run_dir,
+            worker_run_dir=args.worker_run_dir,
+            project_dir=args.project_dir,
+            worker_ssh=args.worker_ssh,
+            worker_python=args.worker_python,
+        )
+        print(f"wrote {bundle.manifest_path}")
+        print(f"wrote {bundle.file_list_path}")
+        for name, command in bundle.commands.items():
+            print(f"{name}: {command}")
+        return 0
+    if args.command == "isaac-worker-report":
+        result = ingest_isaac_worker_report(args.run_dir, args.report)
+        print(f"wrote {result.report_path}")
+        print(f"status={result.report.get('status')}")
+        return 0
+    if args.command == "render-3dgs-background":
+        kwargs = {"split": args.split, "camera_idx": args.camera_idx}
+        if args.renderer_executable:
+            kwargs["renderer_executable"] = args.renderer_executable
+        result = render_external_3dgs_background(args.run_dir, **kwargs)
+        print(f"wrote {result.report_path}")
+        print(f"status={result.report.get('status')}")
+        return 0
+    if args.command == "export-sim":
+        artifacts = export_sim(args.run_dir, backends=args.backend)
+        for name, path in artifacts.items():
+            print(f"wrote {name}: {path}")
+        return 0
+    if args.command == "qa-sim":
+        report_path = run_export_qa(args.run_dir)
+        print(f"wrote {report_path}")
+        return 0
     parser.error(f"{args.command} is scaffolded but not implemented in V1")
     return 2
 
@@ -165,9 +246,17 @@ def build_parser() -> argparse.ArgumentParser:
     _add_reconstruct_parser(subparsers, "align")
     _add_interactive_parser(subparsers, "interactive")
     _add_support_plane_parser(subparsers)
+    _add_refine_pose_parser(subparsers)
     _add_composite_viewer_parser(subparsers)
+    _add_runtime_viewer_parser(subparsers)
     _add_video_prep_parser(subparsers, "video-prep")
     _add_video_scene_parser(subparsers, "video-scene")
+    _add_export_manifest_parser(subparsers)
+    _add_export_sim_parser(subparsers)
+    _add_qa_sim_parser(subparsers)
+    _add_isaac_worker_bundle_parser(subparsers)
+    _add_isaac_worker_report_parser(subparsers)
+    _add_render_3dgs_background_parser(subparsers)
     for name in ("export", "render"):
         subparsers.add_parser(name)
     return parser
@@ -197,6 +286,7 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction, name: str) -> No
     parser.add_argument("--s2m2-url", action="append", default=None)
     parser.add_argument("--sam3-url", default=SAM3_SEGMENT_URL)
     parser.add_argument("--sam3d-url", default=SAM3D_PROCESS_URL)
+    parser.add_argument("--sam3d-api", choices=("process", "mesh-job"), default="process")
     parser.add_argument("--inpaint-url", default=None)
     parser.set_defaults(s2m2_url=None)
 
@@ -207,6 +297,7 @@ def _add_reconstruct_parser(subparsers: argparse._SubParsersAction, name: str) -
     parser.add_argument("--calib", required=True, type=Path)
     parser.add_argument("--camera-name", default=None)
     parser.add_argument("--sam3d-url", default=SAM3D_PROCESS_URL)
+    parser.add_argument("--sam3d-api", choices=("process", "mesh-job"), default="process")
 
 
 def _add_interactive_parser(subparsers: argparse._SubParsersAction, name: str) -> None:
@@ -221,12 +312,34 @@ def _add_support_plane_parser(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument("--force", action="store_true", help="Recompute and reapply even if support_plane already exists")
 
 
+def _add_refine_pose_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser("refine-pose")
+    parser.add_argument("--run-dir", required=True, type=Path)
+    parser.add_argument("--tolerance-m", type=float, default=0.005)
+    parser.add_argument("--visual-bbox", action="store_true", help="Refine visual asset scale from reference-camera mask bboxes")
+    parser.add_argument(
+        "--orientation-override",
+        action="append",
+        default=None,
+        help="Manual orientation override as object_id:flip_local_x_180, object_id:flip_local_y_180, or object_id:flip_local_z_180",
+    )
+
+
 def _add_composite_viewer_parser(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser("composite-viewer")
     parser.add_argument("--run-dir", required=True, type=Path)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7010)
     parser.add_argument("--export-only", action="store_true")
+
+
+def _add_runtime_viewer_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser("runtime-viewer")
+    parser.add_argument("--run-dir", required=True, type=Path)
+    parser.add_argument("--backend", choices=("genesis", "isaac"), default="genesis")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=7030)
+    parser.add_argument("--serve", action="store_true", help="Start the runtime server after exporting")
 
 
 def _add_video_prep_parser(subparsers: argparse._SubParsersAction, name: str) -> None:
@@ -246,9 +359,51 @@ def _add_video_scene_parser(subparsers: argparse._SubParsersAction, name: str) -
     parser.add_argument("--settle-steps", type=int, default=100)
     parser.add_argument("--sam3-url", default=SAM3_SEGMENT_URL)
     parser.add_argument("--sam3d-url", default=SAM3D_PROCESS_URL)
+    parser.add_argument("--sam3d-api", choices=("process", "mesh-job"), default="process")
     parser.add_argument("--qwen-base-url", default=None)
     parser.add_argument("--qwen-api-key", default=None)
     parser.add_argument("--qwen-model", default=None)
+
+
+def _add_export_manifest_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser("export-manifest")
+    parser.add_argument("--run-dir", required=True, type=Path)
+
+
+def _add_export_sim_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser("export-sim")
+    parser.add_argument("--run-dir", required=True, type=Path)
+    parser.add_argument("--backend", action="append", choices=("genesis", "usd", "isaac"), required=True)
+
+
+def _add_qa_sim_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser("qa-sim")
+    parser.add_argument("--run-dir", required=True, type=Path)
+
+
+def _add_isaac_worker_bundle_parser(subparsers: argparse._SubParsersAction) -> None:
+    from .defaults import ISAAC_WORKER_PYTHON, ISAAC_WORKER_SSH
+
+    parser = subparsers.add_parser("isaac-worker-bundle")
+    parser.add_argument("--run-dir", required=True, type=Path)
+    parser.add_argument("--worker-run-dir", default=None)
+    parser.add_argument("--project-dir", default="/mnt/workspace/wenqian/real2sim_scene_foundry")
+    parser.add_argument("--worker-ssh", default=ISAAC_WORKER_SSH)
+    parser.add_argument("--worker-python", default=ISAAC_WORKER_PYTHON)
+
+
+def _add_isaac_worker_report_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser("isaac-worker-report")
+    parser.add_argument("--run-dir", required=True, type=Path)
+    parser.add_argument("--report", required=True, type=Path)
+
+
+def _add_render_3dgs_background_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser("render-3dgs-background")
+    parser.add_argument("--run-dir", required=True, type=Path)
+    parser.add_argument("--renderer-executable", default=None, type=Path)
+    parser.add_argument("--split", default="test")
+    parser.add_argument("--camera-idx", type=int, default=0)
 
 
 def _add_stereo_args(parser: argparse.ArgumentParser) -> None:
@@ -310,6 +465,20 @@ def _parse_int_tuple(value: str, expected: int):
     return tuple(parts)
 
 
+def _parse_orientation_overrides(values: list[str]) -> dict[str, str]:
+    overrides = {}
+    for value in values:
+        if ":" not in value:
+            raise ValueError(f"orientation override must be object_id:operation, got {value!r}")
+        object_id, operation = value.split(":", 1)
+        object_id = object_id.strip()
+        operation = operation.strip()
+        if not object_id or not operation:
+            raise ValueError(f"orientation override must be object_id:operation, got {value!r}")
+        overrides[object_id] = operation
+    return overrides
+
+
 def _proposal_label_fallbacks(target_labels: list[str]) -> list[list[str]]:
     fallbacks: list[list[str]] = []
     for label in target_labels:
@@ -340,9 +509,13 @@ def _sam3_client_from_args(args: argparse.Namespace):
 
 
 def _sam3d_client_from_args(args: argparse.Namespace):
-    from .clients import SAM3DClient
+    from .clients import SAM3DClient, SAM3DMeshJobClient
 
-    return SAM3DClient(args.sam3d_url)
+    sam3d_url = str(args.sam3d_url)
+    api_mode = getattr(args, "sam3d_api", "process")
+    if api_mode == "mesh-job" or sam3d_url.rstrip("/").endswith("/api/jobs"):
+        return SAM3DMeshJobClient(sam3d_url)
+    return SAM3DClient(sam3d_url)
 
 
 def _background_inpaint_client_from_args(args: argparse.Namespace):
@@ -364,6 +537,48 @@ class BoxMaskClient:
         mask = np.zeros((self._height, self._width), dtype=bool)
         mask[max(0, y0) : min(self._height, y1), max(0, x0) : min(self._width, x1)] = True
         return mask
+
+
+def build_sim_export_manifest(run_dir: str | Path) -> Path:
+    from .sim_export_manifest import write_sim_export_manifest as impl
+
+    return impl(run_dir)
+
+
+def write_sim_export_manifest(run_dir: str | Path) -> Path:
+    from .sim_export_manifest import write_sim_export_manifest as impl
+
+    return impl(run_dir)
+
+
+def export_sim(run_dir: str | Path, *, backends: list[str]) -> dict[str, Path]:
+    from .sim_export_manifest import export_sim as impl
+
+    return impl(run_dir, backends=backends)
+
+
+def run_export_qa(run_dir: str | Path) -> Path:
+    from .export_qa import run_export_qa as impl
+
+    return impl(run_dir)
+
+
+def build_isaac_worker_bundle(run_dir: str | Path, **kwargs):
+    from .isaac_worker_bridge import build_isaac_worker_bundle as impl
+
+    return impl(run_dir, **kwargs)
+
+
+def ingest_isaac_worker_report(run_dir: str | Path, report_path: str | Path):
+    from .isaac_worker_bridge import ingest_isaac_worker_report as impl
+
+    return impl(run_dir, report_path)
+
+
+def render_external_3dgs_background(run_dir: str | Path, **kwargs):
+    from .background_3dgs_render import render_external_3dgs_background as impl
+
+    return impl(run_dir, **kwargs)
 
 
 if __name__ == "__main__":

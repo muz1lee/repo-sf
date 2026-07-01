@@ -9,6 +9,8 @@ from pathlib import Path
 import numpy as np
 import trimesh
 
+from .collision_assets import ensure_collision_assets
+
 
 @dataclass(frozen=True)
 class InteractiveExportResult:
@@ -22,12 +24,15 @@ def export_interactive_scene(run_dir: str | Path, *, settle_steps: int = 100) ->
     qa_dir = run / "qa"
     export_dir.mkdir(parents=True, exist_ok=True)
     qa_dir.mkdir(parents=True, exist_ok=True)
+    ensure_collision_assets(run)
     manifest_path = run / "scene_manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     script_path = export_dir / "run_interactive_scene.py"
     script_path.write_text(_genesis_script(), encoding="utf-8")
 
     object_reports = [_proxy_check_object(run, item) for item in manifest.get("objects", [])]
+    collision_sources_by_object = {item["object_id"]: item["collision_source"] for item in object_reports}
+    genesis_collision_sources_by_object = {item["object_id"]: item["genesis_collision_source"] for item in object_reports}
     report = {
         "version": 1,
         "interactive_script": str(script_path.relative_to(run)),
@@ -41,7 +46,12 @@ def export_interactive_scene(run_dir: str | Path, *, settle_steps: int = 100) ->
             "status": "proxy_checked",
             "settle_steps": int(settle_steps),
             "nan_detected": bool(any(item["has_nan"] for item in object_reports)),
-            "note": "Genesis settle is executed by the generated launcher; proxy check validates manifest and mesh loadability.",
+            "settled_pose_delta_report": "qa/settled_pose_delta_report.json",
+            "visual_physics_coherence": _visual_physics_coherence(),
+            "collision_sources_by_object": collision_sources_by_object,
+            "genesis_collision_sources_by_object": genesis_collision_sources_by_object,
+            "genesis_collision_status": "runtime_convexification_enabled",
+            "note": "Genesis settle is executed by the generated launcher; proxy check validates manifest, collision mesh loadability, and provenance.",
         },
         "objects": object_reports,
     }
@@ -63,6 +73,8 @@ def _support_plane_report(support_plane: dict[str, object] | None) -> dict[str, 
         "normal_world": support_plane.get("normal_world"),
         "table_collision_mesh_path": support_plane.get("table_collision_mesh_path"),
         "table_collision_source_backend": support_plane.get("table_collision_source_backend"),
+        "table_collision_geometry_type": support_plane.get("table_collision_geometry_type"),
+        "table_collision_final": support_plane.get("table_collision_final", False),
         "table_bounds_world_xy": support_plane.get("table_bounds_world_xy"),
         "table_collision_pos_world": support_plane.get("table_collision_pos_world"),
         "table_collision_size_xyz": support_plane.get("table_collision_size_xyz"),
@@ -84,8 +96,26 @@ def _background_report(background: dict[str, object] | None) -> dict[str, object
     return report
 
 
+def _visual_physics_coherence() -> dict[str, object]:
+    return {
+        "status": "partial",
+        "visual_assets_referenced_by_runtime": False,
+        "collision_assets_referenced_by_runtime": True,
+        "background_asset_referenced_by_runtime": False,
+        "reason": (
+            "Genesis interactive settle runtime uses collision meshes and support surface only; "
+            "foreground visual meshes and native background visuals are not referenced by this runtime."
+        ),
+    }
+
+
 def _proxy_check_object(run_dir: Path, item: dict[str, object]) -> dict[str, object]:
-    mesh_path = run_dir / str(item["mesh_path"])
+    collision_asset = item.get("collision_asset") if isinstance(item.get("collision_asset"), dict) else {}
+    visual_asset = item.get("visual_asset") if isinstance(item.get("visual_asset"), dict) else {}
+    debug_proxy = item.get("debug_proxy") if isinstance(item.get("debug_proxy"), dict) else {}
+    physics = _load_physics_record(run_dir, item)
+    collision_path_value = collision_asset.get("path") or item.get("mesh_path")
+    mesh_path = run_dir / str(collision_path_value)
     loadable = False
     has_nan = False
     bounds = None
@@ -102,10 +132,21 @@ def _proxy_check_object(run_dir: Path, item: dict[str, object]) -> dict[str, obj
         error = str(exc)
     transform = np.asarray(item["T_object_to_world"], dtype=np.float64)
     quat = _matrix_to_quat_wxyz(transform[:3, :3])
+    collision_source = str(collision_asset.get("source") or physics.get("collision_source") or "legacy_mesh_path_runtime_collision")
+    genesis_collision_source = f"{collision_source}+genesis_runtime_convexification"
     return {
         "object_id": item["object_id"],
-        "mesh_path": item["mesh_path"],
+        "mesh_path": str(collision_path_value),
+        "legacy_mesh_path": item.get("mesh_path"),
+        "visual_asset": visual_asset,
+        "collision_asset": collision_asset,
+        "debug_proxy": debug_proxy,
+        "physics": physics,
+        "collision_source": collision_source,
+        "genesis_collision_source": genesis_collision_source,
+        "genesis_collision_status": "runtime_convexification_enabled",
         "mesh_loadable": loadable,
+        "collision_mesh_loadable": loadable,
         "has_nan": has_nan or bool(not np.all(np.isfinite(transform))),
         "world_translation": [float(v) for v in transform[:3, 3]],
         "world_quat_wxyz": [float(v) for v in quat],
@@ -113,6 +154,24 @@ def _proxy_check_object(run_dir: Path, item: dict[str, object]) -> dict[str, obj
         "error": error,
     }
 
+
+def _load_physics_record(run_dir: Path, item: dict[str, object]) -> dict[str, object]:
+    physics = item.get("physics") if isinstance(item.get("physics"), dict) else {}
+    record = dict(physics)
+    physics_path = record.get("path")
+    if physics_path:
+        path = run_dir / str(physics_path)
+        if path.is_file():
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            loaded["path"] = str(physics_path)
+            return loaded
+    record.setdefault("path", None)
+    record.setdefault("mass_kg", item.get("mass_kg"))
+    record.setdefault("friction", item.get("friction"))
+    record.setdefault("restitution", item.get("restitution", 0.0))
+    collision_asset = item.get("collision_asset") if isinstance(item.get("collision_asset"), dict) else {}
+    record.setdefault("collision_source", collision_asset.get("source", "legacy_mesh_path_runtime_collision"))
+    return record
 
 def _scene_vertices(loaded) -> np.ndarray:  # noqa: ANN001
     if isinstance(loaded, trimesh.Trimesh):
@@ -272,6 +331,23 @@ def entity_aabb(entity):
     return [[float(v) for v in lo], [float(v) for v in hi]]
 
 
+def load_object_physics(run_dir, obj):
+    physics = dict(obj.get("physics", {}) or {})
+    physics_path = physics.get("path")
+    if physics_path:
+        path = run_dir / physics_path
+        if path.exists():
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            loaded.setdefault("path", physics_path)
+            return loaded
+    physics.setdefault("mass_kg", obj.get("mass_kg", 0.2))
+    physics.setdefault("friction", obj.get("friction", 0.8))
+    physics.setdefault("restitution", obj.get("restitution", 0.0))
+    collision_asset = obj.get("collision_asset", {}) or {}
+    physics.setdefault("collision_source", collision_asset.get("source", "legacy_mesh_path_runtime_collision"))
+    return physics
+
+
 def displacement(a, b):
     av = np.asarray(a, dtype=np.float64)
     bv = np.asarray(b, dtype=np.float64)
@@ -294,6 +370,19 @@ def aabb_fall_out(aabb, bounds, margin=0.15):
         (float(aabb[0][1]) + float(aabb[1][1])) * 0.5,
     ]
     return fall_out(center, bounds, margin=margin)
+
+
+def visual_physics_coherence():
+    return {
+        "status": "partial",
+        "visual_assets_referenced_by_runtime": False,
+        "collision_assets_referenced_by_runtime": True,
+        "background_asset_referenced_by_runtime": False,
+        "reason": (
+            "Genesis interactive settle runtime uses collision meshes and support surface only; "
+            "foreground visual meshes and native background visuals are not referenced by this runtime."
+        ),
+    }
 
 
 def main() -> int:
@@ -319,12 +408,37 @@ def main() -> int:
     table_collision_mesh_path = support_plane.get("table_collision_mesh_path")
     table_collision_pos = tuple(float(v) for v in support_plane.get("table_collision_pos_world", (0.0, 0.0, -0.02)))
     table_collision_size = support_plane.get("table_collision_size_xyz")
-    if table_collision_size:
+    support_geometry_type = str(support_plane.get("table_collision_geometry_type") or "")
+    use_support_mesh = support_geometry_type in {"polygon_slab", "convex_hull_slab"} and table_collision_mesh_path
+    support_surface_runtime = {
+        "mesh_path": table_collision_mesh_path,
+        "geometry_type": support_geometry_type or "unknown",
+        "used_polygon_slab_mesh": bool(use_support_mesh),
+        "used_box_proxy": bool((not use_support_mesh) and table_collision_size),
+        "support_mesh_file_meshes_are_zup": bool(use_support_mesh),
+        "table_collision_final": bool(support_plane.get("table_collision_final", False)),
+        "table_collision_source_backend": support_plane.get("table_collision_source_backend"),
+    }
+    if use_support_mesh:
+        scene.add_entity(
+            morph=gs.morphs.Mesh(
+                file=str(args.run_dir / table_collision_mesh_path),
+                pos=table_collision_pos,
+                quat=tuple(float(v) for v in support_plane.get("table_collision_quat_wxyz", (1.0, 0.0, 0.0, 0.0))),
+                fixed=True,
+                collision=True,
+                convexify=False,
+                file_meshes_are_zup=True,
+            ),
+            material=gs.materials.Rigid(friction=0.9, rho=None),
+        )
+    elif table_collision_size:
         scene.add_entity(
             morph=gs.morphs.Box(
                 pos=table_collision_pos,
                 size=tuple(float(v) for v in table_collision_size),
                 fixed=True,
+                collision=True,
             ),
             material=gs.materials.Rigid(friction=0.9, rho=None),
         )
@@ -344,14 +458,33 @@ def main() -> int:
     else:
         scene.add_entity(gs.morphs.Plane())
     entities = []
+    collision_sources_by_object = {}
+    genesis_collision_sources_by_object = {}
+    genesis_collision_status_by_object = {}
     for obj in manifest.get("objects", []):
-        mesh_file = args.run_dir / obj["mesh_path"]
+        collision_asset = obj.get("collision_asset", {})
+        if not collision_asset.get("path"):
+            legacy_mesh_path = obj.get("mesh_path")
+            collision_asset = {
+                "path": legacy_mesh_path,
+                "source": "legacy_mesh_path_runtime_collision",
+                "status": "runtime_substitution",
+            }
+        collision_mesh_file = args.run_dir / collision_asset["path"]
+        physics = load_object_physics(args.run_dir, obj)
         T = obj["T_object_to_world"]
         pos = (float(T[0][3]), float(T[1][3]), float(T[2][3]))
         quat = matrix_to_quat_wxyz(T)
+        collision_source = str(collision_asset.get("source") or physics.get("collision_source") or "unknown_collision_source")
+        genesis_collision_status = "runtime_convexification_enabled"
+        genesis_collision_source = f"{collision_source}+genesis_runtime_convexification"
+        object_id = str(obj["object_id"])
+        collision_sources_by_object[object_id] = collision_source
+        genesis_collision_sources_by_object[object_id] = genesis_collision_source
+        genesis_collision_status_by_object[object_id] = genesis_collision_status
         entity = scene.add_entity(
             morph=gs.morphs.Mesh(
-                file=str(mesh_file),
+                file=str(collision_mesh_file),
                 pos=pos,
                 quat=quat,
                 fixed=False,
@@ -360,15 +493,15 @@ def main() -> int:
                 align=False,
                 decimate_face_num=500,
             ),
-            material=gs.materials.Rigid(friction=float(obj.get("friction", 0.8)), rho=None),
+            material=gs.materials.Rigid(friction=float(physics.get("friction", obj.get("friction", 0.8))), rho=None),
         )
-        entities.append((entity, obj, list(pos), list(quat)))
+        entities.append((entity, obj, list(pos), list(quat), collision_source, genesis_collision_source, genesis_collision_status, str(collision_asset["path"]), physics))
     scene.build()
-    for entity, obj, _initial_pos, _initial_quat in entities:
-        if obj.get("mass_kg"):
-            entity.set_mass(float(obj["mass_kg"]))
-        if obj.get("friction"):
-            entity.set_friction(float(obj["friction"]))
+    for entity, obj, _initial_pos, _initial_quat, _collision_source, _genesis_collision_source, _genesis_collision_status, _collision_asset_path, physics in entities:
+        if physics.get("mass_kg"):
+            entity.set_mass(float(physics["mass_kg"]))
+        if physics.get("friction"):
+            entity.set_friction(float(physics["friction"]))
     for _ in range(max(0, int(args.settle_steps))):
         scene.step()
     qa_dir = args.run_dir / "qa"
@@ -379,31 +512,70 @@ def main() -> int:
     max_penetration = 0.0
     fall_out_detected = False
     nan_detected = False
-    for entity, obj, initial_pos, initial_quat in entities:
+    pose_delta_threshold_m = 0.02
+    pose_written_back = False
+    requires_viewer_export_delta_display = False
+    settled_pose_delta_objects = []
+    for entity, obj, initial_pos, initial_quat, collision_source, genesis_collision_source, genesis_collision_status, collision_asset_path, physics in entities:
         object_id = str(obj["object_id"])
         final_pos = tensor_to_vec(entity.get_pos(relative=True))[:3]
         final_quat = tensor_to_vec(entity.get_quat(relative=True))[:4]
         final_aabb = entity_aabb(entity)
-        disp = displacement(final_pos, initial_pos)
+        translation_delta = [
+            float(v)
+            for v in (np.asarray(final_pos, dtype=np.float64) - np.asarray(initial_pos, dtype=np.float64)).reshape(-1)[:3]
+        ]
+        disp = float(np.linalg.norm(np.asarray(translation_delta, dtype=np.float64)))
         vertical_delta = float(final_pos[2] - initial_pos[2])
         penetration = max(0.0, -float(final_aabb[0][2]))
         object_fall_out = aabb_fall_out(final_aabb, table_bounds)
         object_has_nan = not np.all(np.isfinite(np.asarray(final_pos + final_quat + final_aabb[0] + final_aabb[1], dtype=np.float64)))
+        pose_delta_exceeds_threshold = disp > pose_delta_threshold_m
+        pose_delta_status = "moved_not_written_back" if pose_delta_exceeds_threshold and not pose_written_back else "within_threshold"
+        viewer_export_action = (
+            "display_initial_and_settled_pose_or_write_back"
+            if pose_delta_exceeds_threshold and not pose_written_back
+            else "no_delta_display_required"
+        )
         max_displacement = max(max_displacement, disp)
         max_penetration = max(max_penetration, penetration)
         fall_out_detected = fall_out_detected or object_fall_out
         nan_detected = nan_detected or object_has_nan
+        requires_viewer_export_delta_display = requires_viewer_export_delta_display or (pose_delta_exceeds_threshold and not pose_written_back)
+        settled_pose_delta_objects.append({
+            "object_id": object_id,
+            "initial_pos": initial_pos,
+            "final_pos": final_pos,
+            "translation_delta_m": translation_delta,
+            "displacement_m": disp,
+            "threshold_m": float(pose_delta_threshold_m),
+            "status": pose_delta_status,
+            "pose_written_back": bool(pose_written_back),
+            "viewer_export_action": viewer_export_action,
+        })
         final_pose_by_object[object_id] = {
             "initial_position": initial_pos,
             "initial_quat_wxyz": initial_quat,
             "final_position": final_pos,
             "final_quat_wxyz": final_quat,
             "final_aabb_world": final_aabb,
+            "translation_delta_m": translation_delta,
             "displacement_m": disp,
             "vertical_displacement_m": vertical_delta,
+            "threshold_m": float(pose_delta_threshold_m),
+            "pose_delta_status": pose_delta_status,
+            "pose_written_back": bool(pose_written_back),
+            "viewer_export_action": viewer_export_action,
             "penetration_depth_m": penetration,
             "fall_out": object_fall_out,
             "nan_detected": object_has_nan,
+            "collision_asset_path": collision_asset_path,
+            "collision_source": collision_source,
+            "genesis_collision_source": genesis_collision_source,
+            "genesis_collision_status": genesis_collision_status,
+            "mass_kg": float(physics.get("mass_kg", obj.get("mass_kg", 0.0))),
+            "friction": float(physics.get("friction", obj.get("friction", 0.0))),
+            "restitution": float(physics.get("restitution", 0.0)),
         }
     stability_thresholds = {
         "max_penetration_depth_m": 0.005,
@@ -419,6 +591,7 @@ def main() -> int:
         )
         else "failed"
     )
+    coherence = visual_physics_coherence()
     settle_report = {
         "status": "completed",
         "stability_status": stability_status,
@@ -427,14 +600,38 @@ def main() -> int:
         "object_count": len(entities),
         "nan_detected": nan_detected,
         "support_plane": manifest.get("support_plane", {"status": "absent"}),
+        "support_surface_runtime": support_surface_runtime,
         "table_collision_mesh_path": table_collision_mesh_path,
+        "collision_sources_by_object": collision_sources_by_object,
+        "genesis_collision_sources_by_object": genesis_collision_sources_by_object,
+        "genesis_collision_status_by_object": genesis_collision_status_by_object,
         "final_pose_by_object": final_pose_by_object,
+        "pose_delta_threshold_m": float(pose_delta_threshold_m),
+        "pose_written_back": bool(pose_written_back),
+        "requires_viewer_export_delta_display": bool(requires_viewer_export_delta_display),
+        "settled_pose_delta_report": "qa/settled_pose_delta_report.json",
+        "visual_physics_coherence": coherence,
         "max_displacement_m": max_displacement,
         "max_penetration_depth_m": max_penetration,
         "fall_out_detected": fall_out_detected,
     }
+    settled_pose_delta_report = {
+        "status": "partial" if requires_viewer_export_delta_display or coherence["status"] == "partial" else "passed",
+        "settle_report_path": "qa/genesis_settle_report.json",
+        "threshold_m": float(pose_delta_threshold_m),
+        "max_displacement_m": float(max_displacement),
+        "pose_written_back": bool(pose_written_back),
+        "writeback_policy": "not_written_back_current_contract",
+        "requires_viewer_export_delta_display": bool(requires_viewer_export_delta_display),
+        "objects": settled_pose_delta_objects,
+        "visual_physics_coherence": coherence,
+    }
     (qa_dir / "genesis_settle_report.json").write_text(
         json.dumps(settle_report, indent=2),
+        encoding="utf-8",
+    )
+    (qa_dir / "settled_pose_delta_report.json").write_text(
+        json.dumps(settled_pose_delta_report, indent=2),
         encoding="utf-8",
     )
     qa_report = qa_dir / "qa_report.json"

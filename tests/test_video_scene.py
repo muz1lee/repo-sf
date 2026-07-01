@@ -89,6 +89,8 @@ def test_attach_video_3dgs_background_updates_scene_manifest_and_qa(tmp_path):
         encoding="utf-8",
     )
     (run / "qa" / "qa_report.json").write_text(json.dumps({"background": {}}), encoding="utf-8")
+    (run / "background").mkdir(parents=True)
+    (run / "background" / "bg_only_cloud.ply").write_text("ply\n", encoding="utf-8")
     (run / "video" / "3dgs_status.json").parent.mkdir(parents=True)
     (run / "video" / "3dgs_status.json").write_text(
         json.dumps(
@@ -112,8 +114,19 @@ def test_attach_video_3dgs_background_updates_scene_manifest_and_qa(tmp_path):
     assert background["gaussian_splat_path"] == "video/3dgs/run"
     assert background["gaussian_splat_config_path"] == "video/3dgs/run/config.yml"
     assert background["gaussian_splat_checkpoint_path"] == "video/3dgs/run/nerfstudio_models/step.ckpt"
+    assert background["registration_path"] == "background/registration.json"
+    registration = json.loads((run / "background" / "registration.json").read_text(encoding="utf-8"))
+    assert registration["status"] == "partial_external_render_only"
+    assert registration["source_kind"] == "bg_only_cloud"
+    assert registration["scale_source"] == "input_metric_depth"
+    assert registration["registrations"]["bg_only_cloud"]["status"] == "registered"
+    assert registration["registrations"]["3dgs"]["status"] == "blocked_missing_camera_pose_scale_evidence"
+    assert registration["gaussian_splat"]["status"] == "sidecar_not_native"
+    assert registration["gaussian_splat"]["native_rendering"] is False
     qa = json.loads((run / "qa" / "qa_report.json").read_text(encoding="utf-8"))
     assert qa["background"]["status"] == "trained_video_3dgs"
+    assert qa["background_registration"]["status"] == "partial_external_render_only"
+    assert qa["background_registration"]["registrations"]["bg_only_cloud"]["status"] == "registered"
 
 
 def test_run_video_reference_scene_builds_objects_and_attaches_3dgs_background(tmp_path):

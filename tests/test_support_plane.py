@@ -171,7 +171,13 @@ def test_estimate_and_apply_support_plane_prefers_background_point_ring(tmp_path
     assert manifest["support_plane"]["object_bottoms_after_m"]["bottle"] == pytest.approx(0.0, abs=1e-8)
     assert manifest["support_plane"]["object_vertical_corrections_m"]["cup"] == pytest.approx(-0.13)
     assert manifest["support_plane"]["object_vertical_corrections_m"]["bottle"] == pytest.approx(-0.13)
-    assert manifest["support_plane"]["table_collision_source_backend"] == "background_support_points_rect"
+    assert manifest["support_plane"]["support_surface_status"] == "passed"
+    assert manifest["support_plane"]["table_collision_final"] is True
+    assert manifest["support_plane"]["table_collision_source_backend"] == "tabletop_mask_polygon_slab"
+    assert manifest["support_plane"]["table_collision_geometry_type"] == "polygon_slab"
+    assert (run_dir / "background" / "tabletop_mask.png").is_file()
+    assert (run_dir / "background" / "table_polygon_world.json").is_file()
+    assert (run_dir / "background" / "table_collision_report.json").is_file()
     table_path = run_dir / manifest["support_plane"]["table_collision_mesh_path"]
     assert table_path.is_file()
     table = trimesh.load(table_path, force="mesh")
@@ -183,3 +189,68 @@ def test_estimate_and_apply_support_plane_prefers_background_point_ring(tmp_path
     usda = (run_dir / "exports" / "scene.usda").read_text(encoding="utf-8")
     assert "table_collision_mesh_path" in usda
     assert "table_collision_pos_world" in usda
+
+
+def test_estimate_and_apply_support_plane_prefers_collision_asset_geometry(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    object_dir = run_dir / "objects" / "cup"
+    object_dir.mkdir(parents=True)
+    visual_path = object_dir / "mesh_aligned.glb"
+    collision_path = object_dir / "collision.glb"
+    trimesh.creation.box(extents=(0.2, 0.2, 1.0)).export(visual_path)
+    trimesh.creation.box(extents=(0.2, 0.2, 0.2)).export(collision_path)
+    transform = [[1, 0, 0, 0.0], [0, 1, 0, 0.0], [0, 0, 1, 0.35], [0, 0, 0, 1]]
+    (object_dir / "pose.json").write_text(
+        json.dumps(
+            {
+                "object_id": "cup",
+                "label": "cup",
+                "T_object_to_camera": transform,
+                "T_object_to_world": transform,
+                "mesh_path": str(visual_path.relative_to(run_dir)),
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "exports").mkdir()
+    (run_dir / "qa").mkdir()
+    (run_dir / "qa" / "qa_report.json").write_text(json.dumps({"objects": []}), encoding="utf-8")
+    (run_dir / "scene_manifest.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "coordinate_frames": {
+                    "camera": "opencv_x_right_y_down_z_forward_meters",
+                    "world": "z_up_ground_plane_meters",
+                },
+                "objects": [
+                    {
+                        "object_id": "cup",
+                        "label": "cup",
+                        "mesh_path": str(visual_path.relative_to(run_dir)),
+                        "mask_path": "objects/cup/mask.png",
+                        "crop_path": "objects/cup/crop.png",
+                        "collision_asset": {
+                            "path": str(collision_path.relative_to(run_dir)),
+                            "source": "bbox_from_legacy_mesh_proxy",
+                            "status": "ready",
+                        },
+                        "T_object_to_camera": transform,
+                        "T_object_to_world": transform,
+                        "scale_m": 0.2,
+                        "mass_kg": 0.25,
+                        "friction": 0.8,
+                        "confidence": 0.9,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = estimate_and_apply_support_plane(run_dir)
+
+    assert report["original_height_world_m"] == pytest.approx(0.25)
+    manifest = json.loads((run_dir / "scene_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["objects"][0]["T_object_to_world"][2][3] == pytest.approx(0.10)

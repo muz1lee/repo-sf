@@ -13,6 +13,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
+from .background_registration import BackgroundRegistrationResult, write_background_registration
 from .camera import CameraIntrinsics
 from .clients import SAM3Client, SAM3DClient
 from .defaults import SAM3D_PROCESS_URL, SAM3_SEGMENT_URL
@@ -140,6 +141,7 @@ def run_video_reference_scene(
     )
     attach_video_3dgs_background(run)
     estimate_and_apply_support_plane(run)
+    write_background_registration(run)
     interactive = export_interactive_scene(run, settle_steps=settle_steps)
     return VideoReferenceSceneResult(
         run_dir=run,
@@ -170,26 +172,43 @@ def attach_video_3dgs_background(run_dir: str | Path) -> SceneBackground:
         gaussian_splat_config_path=str(outputs.get("latest_config")) if outputs.get("latest_config") else None,
         gaussian_splat_checkpoint_path=str(outputs.get("latest_checkpoint")) if outputs.get("latest_checkpoint") else None,
     )
-    _merge_manifest_background(run, background)
-    _merge_qa_background(run, background)
+    registration = write_background_registration(run)
+    _merge_manifest_background(run, background, registration)
+    _merge_qa_background(run, background, registration)
     return background
 
 
-def _merge_manifest_background(run: Path, background: SceneBackground) -> None:
+def _merge_manifest_background(run: Path, background: SceneBackground, registration: BackgroundRegistrationResult) -> None:
     manifest_path = run / "scene_manifest.json"
     if not manifest_path.is_file():
         raise FileNotFoundError(f"scene_manifest.json not found: {manifest_path}")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["background"] = background.to_dict()
+    background_data = background.to_dict()
+    background_data["registration_path"] = str(registration.path.relative_to(run))
+    background_data["registration_status"] = registration.data["status"]
+    background_data["source_kind"] = registration.data["source_kind"]
+    manifest["background"] = background_data
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
 
-def _merge_qa_background(run: Path, background: SceneBackground) -> None:
+def _merge_qa_background(run: Path, background: SceneBackground, registration: BackgroundRegistrationResult) -> None:
     qa_path = run / "qa" / "qa_report.json"
     if not qa_path.is_file():
         return
     qa = json.loads(qa_path.read_text(encoding="utf-8"))
-    qa["background"] = background.to_dict()
+    background_data = background.to_dict()
+    background_data["registration_path"] = str(registration.path.relative_to(run))
+    background_data["registration_status"] = registration.data["status"]
+    background_data["source_kind"] = registration.data["source_kind"]
+    qa["background"] = background_data
+    qa["background_registration"] = {
+        "path": str(registration.path.relative_to(run)),
+        "status": registration.data["status"],
+        "source_kind": registration.data["source_kind"],
+        "scale_source": registration.data["scale_source"],
+        "registrations": registration.data.get("registrations", {}),
+        "gaussian_splat": registration.data.get("gaussian_splat", {}),
+    }
     qa_path.write_text(json.dumps(qa, indent=2), encoding="utf-8")
 
 

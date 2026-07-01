@@ -66,6 +66,40 @@ class ImagePromptFallbackSAM3DClient(FakeSAM3DClient):
         return type("Result", (), {"mesh_path": mesh_path, "metadata": {"success": True}})()
 
 
+class PointCloudOnlySAM3DClient:
+    def __init__(self):
+        self.calls = []
+
+    def process(self, image_path, *, mask_path=None, text_prompt="object", out_dir):
+        self.calls.append((image_path, mask_path, text_prompt, out_dir))
+        out_dir.mkdir(parents=True, exist_ok=True)
+        point_cloud_path = out_dir / "point_cloud.ply"
+        point_cloud_path.write_text(
+            "\n".join(
+                [
+                    "ply",
+                    "format ascii 1.0",
+                    "element vertex 4",
+                    "property float x",
+                    "property float y",
+                    "property float z",
+                    "end_header",
+                    "0 0 1",
+                    "1 0 1",
+                    "0 1 1",
+                    "1 1 2",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return type(
+            "Result",
+            (),
+            {"mesh_path": None, "point_cloud_path": point_cloud_path, "metadata": {"success": True, "ply_camera_base64": "payload"}},
+        )()
+
+
 def test_run_reconstruct_align_writes_sam3d_raw_mesh_aligned_mesh_and_metrics(tmp_path):
     left = tmp_path / "left.png"
     right = tmp_path / "right.png"
@@ -102,23 +136,94 @@ def test_run_reconstruct_align_writes_sam3d_raw_mesh_aligned_mesh_and_metrics(tm
     obj_dir = extract.out_dir / "objects" / "red_cup"
     assert sam3d.calls
     assert (obj_dir / "sam3d" / "raw_mesh.glb").is_file()
-    assert (obj_dir / "mesh_aligned.glb").is_file()
+    assert (obj_dir / "visual.glb").is_file()
     pose = json.loads((obj_dir / "pose.json").read_text(encoding="utf-8"))
     assert pose["source_backend"] == "sam3d_aligned"
     assert "ply_camera_base64" not in pose["sam3d_metadata"]
     assert pose["alignment"]["scale"] > 0
     assert pose["alignment"]["depth_residual_m"] >= 0
     assert pose["alignment"]["center_error_px"] >= 0
-    local_mesh = trimesh.load(obj_dir / "mesh_aligned.glb", force="mesh")
+    local_mesh = trimesh.load(obj_dir / "visual.glb", force="mesh")
     assert np.linalg.norm(local_mesh.bounds.mean(axis=0)) < 1e-6
     assert pose["T_object_to_camera"][2][3] > 0.0
+    assert pose["visual_asset"]["status"] == "visual_glb_available"
+    assert pose["visual_asset"]["visual_asset"]["path"] == "objects/red_cup/visual.glb"
+    assert (obj_dir / "visual_asset_report.json").is_file()
     manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
-    assert manifest["objects"][0]["mesh_path"] == "objects/red_cup/mesh_aligned.glb"
+    assert manifest["objects"][0]["mesh_path"] == "objects/red_cup/visual.glb"
     assert manifest["objects"][0]["source_backend"] == "sam3d_aligned"
     assert manifest["background"]["bg_only_image_path"] == "background/bg_only.png"
     qa = json.loads(result.qa_report_path.read_text(encoding="utf-8"))
     assert qa["objects"][0]["alignment_backend"] == "sam3d_bbox_similarity"
     assert qa["objects"][0]["source_backend"] == "sam3d_aligned"
+
+
+def test_run_reconstruct_align_ply_only_sam3d_writes_visual_point_cloud_and_debug_bbox(tmp_path):
+    left = tmp_path / "left.png"
+    right = tmp_path / "right.png"
+    Image.new("RGB", (6, 5), color=(50, 60, 70)).save(left)
+    Image.new("RGB", (6, 5), color=(45, 55, 65)).save(right)
+    camera = CameraIntrinsics(width=6, height=5, fx=60.0, fy=60.0, cx=2.5, cy=2.0)
+    depth = np.full((5, 6), 1.2, dtype=np.float32)
+    xyz = camera.backproject_depth(depth)
+    extract = run_extract(
+        left_image=left,
+        right_image=right,
+        camera=camera,
+        baseline_m=0.08,
+        out_dir=tmp_path / "run",
+        proposals=[
+            ObjectProposal(
+                label="red cup",
+                object_id="red_cup",
+                bbox_xyxy=(2, 1, 5, 4),
+                point_xy=(3, 2),
+                confidence=0.93,
+                mass_kg=0.11,
+                friction=0.6,
+                source="qwen",
+            )
+        ],
+        depth_client=FakeDepthClient(xyz),
+        sam3_client=FakeSAM3Client(),
+    )
+    sam3d = PointCloudOnlySAM3DClient()
+
+    result = run_reconstruct_align(extract_dir=extract.out_dir, camera=camera, sam3d_client=sam3d)
+
+    obj_dir = extract.out_dir / "objects" / "red_cup"
+    assert (obj_dir / "visual_point_cloud.ply").is_file()
+    assert (obj_dir / "debug_bbox.glb").is_file()
+    assert (obj_dir / "visual_asset_report.json").is_file()
+    assert not (obj_dir / "visual.glb").exists()
+    assert not (obj_dir / "mesh_aligned.glb").exists()
+
+    report = json.loads((obj_dir / "visual_asset_report.json").read_text(encoding="utf-8"))
+    assert report["status"] == "blocked_no_mesh_returned"
+    assert report["visual_asset"]["final_visual"] is False
+    assert report["visual_asset"]["path"] == "objects/red_cup/visual_point_cloud.ply"
+    assert report["debug_proxy"]["path"] == "objects/red_cup/debug_bbox.glb"
+    assert report["blocked_reason"] == "sam3d_response_missing_mesh"
+
+    pose = json.loads((obj_dir / "pose.json").read_text(encoding="utf-8"))
+    assert pose["mesh_path"] == "objects/red_cup/visual_point_cloud.ply"
+    assert pose["alignment_mesh_path"] == "objects/red_cup/debug_bbox.glb"
+    assert pose["debug_proxy_path"] == "objects/red_cup/debug_bbox.glb"
+    assert pose["visual_asset"]["status"] == "blocked_no_mesh_returned"
+
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    manifest_object = manifest["objects"][0]
+    assert manifest_object["mesh_path"] == "objects/red_cup/visual_point_cloud.ply"
+    assert manifest_object["visual_asset"]["path"] == "objects/red_cup/visual_point_cloud.ply"
+    assert manifest_object["visual_asset"]["final_visual"] is False
+    assert manifest_object["debug_proxy"]["path"] == "objects/red_cup/debug_bbox.glb"
+    assert manifest_object["debug_proxy"]["final_visual"] is False
+    assert manifest_object["source_backend"] == "sam3d_point_cloud_debug_bbox_alignment"
+    usd_text = result.usd_path.read_text(encoding="utf-8")
+    assert 'mesh_path = "objects/red_cup/debug_bbox.glb"' not in usd_text
+    assert 'mesh_path = "objects/red_cup/visual_point_cloud.ply"' in usd_text
+    qa = json.loads(result.qa_report_path.read_text(encoding="utf-8"))
+    assert qa["objects"][0]["visual_asset_status"] == "blocked_no_mesh_returned"
 
 
 def test_run_reconstruct_align_falls_back_to_noun_prompt_for_sam3d(tmp_path):
