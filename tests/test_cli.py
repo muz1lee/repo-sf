@@ -244,6 +244,44 @@ def test_cli_support_plane_updates_existing_scene(tmp_path):
     assert manifest["objects"][0]["T_object_to_world"][2][3] == pytest.approx(0.1)
 
 
+def test_cli_refine_pose_rgbd_calls_verifier(tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    run.mkdir()
+    seen = []
+
+    class Result:
+        report_path = run / "qa" / "object_pose_alignment_report.json"
+        report = {"status": "blocked"}
+
+    def fake_refine(run_dir, *, frames):  # noqa: ANN001
+        seen.append((run_dir, frames))
+        return Result()
+
+    monkeypatch.setattr("real2sim_scene_foundry.cli.refine_pose_rgbd", fake_refine)
+
+    code = main(["refine-pose-rgbd", "--run-dir", str(run), "--frames", "reference"])
+
+    assert code == 0
+    assert seen == [(run, "reference")]
+
+
+def test_cli_qa_object_alignment_calls_reporter(tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    run.mkdir()
+    seen = []
+
+    def fake_qa(run_dir):  # noqa: ANN001
+        seen.append(run_dir)
+        return {"status": "passed", "report_path": "qa/object_pose_alignment_report.json"}
+
+    monkeypatch.setattr("real2sim_scene_foundry.cli.qa_object_alignment", fake_qa)
+
+    code = main(["qa-object-alignment", "--run-dir", str(run)])
+
+    assert code == 0
+    assert seen == [run]
+
+
 def test_cli_export_manifest_writes_manifest_json(tmp_path, monkeypatch, capsys):
     run = tmp_path / "run"
     run.mkdir()
@@ -270,6 +308,66 @@ def test_cli_export_manifest_writes_manifest_json(tmp_path, monkeypatch, capsys)
     assert f"wrote {run / 'sim_export_manifest.json'}" in captured.out
 
 
+def test_cli_qa_sim_accepts_strict_claims_flag(tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    run.mkdir()
+    seen = []
+
+    def fake_run_export_qa(run_dir, *, strict_claims=False):  # noqa: ANN001
+        seen.append((run_dir, strict_claims))
+        path = run_dir / "qa" / "sim_export_report.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}", encoding="utf-8")
+        return path
+
+    monkeypatch.setattr("real2sim_scene_foundry.cli.run_export_qa", fake_run_export_qa)
+
+    code = main(["qa-sim", "--run-dir", str(run), "--strict-claims"])
+
+    assert code == 0
+    assert seen == [(run, True)]
+
+
+def test_cli_qa_sim_defaults_to_strict_claims(tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    run.mkdir()
+    seen = []
+
+    def fake_run_export_qa(run_dir, *, strict_claims=False):  # noqa: ANN001
+        seen.append((run_dir, strict_claims))
+        path = run_dir / "qa" / "sim_export_report.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}", encoding="utf-8")
+        return path
+
+    monkeypatch.setattr("real2sim_scene_foundry.cli.run_export_qa", fake_run_export_qa)
+
+    code = main(["qa-sim", "--run-dir", str(run)])
+
+    assert code == 0
+    assert seen == [(run, True)]
+
+
+def test_cli_qa_sim_can_request_legacy_non_strict_mode(tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    run.mkdir()
+    seen = []
+
+    def fake_run_export_qa(run_dir, *, strict_claims=False):  # noqa: ANN001
+        seen.append((run_dir, strict_claims))
+        path = run_dir / "qa" / "sim_export_report.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}", encoding="utf-8")
+        return path
+
+    monkeypatch.setattr("real2sim_scene_foundry.cli.run_export_qa", fake_run_export_qa)
+
+    code = main(["qa-sim", "--run-dir", str(run), "--no-strict-claims"])
+
+    assert code == 0
+    assert seen == [(run, False)]
+
+
 def test_cli_render_3dgs_background_calls_external_renderer(tmp_path, monkeypatch):
     run = tmp_path / "run"
     run.mkdir()
@@ -289,6 +387,44 @@ def test_cli_render_3dgs_background_calls_external_renderer(tmp_path, monkeypatc
 
     assert code == 0
     assert calls == [(run, {"split": "test", "camera_idx": 0})]
+
+
+def test_cli_register_3dgs_calls_registration_solver(tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    run.mkdir()
+    seen = []
+
+    class Result:
+        path = run / "background" / "registration.json"
+        data = {"status": "registered"}
+
+    def fake_register(run_dir, *, method, write):  # noqa: ANN001
+        seen.append((run_dir, method, write))
+        return Result()
+
+    monkeypatch.setattr("real2sim_scene_foundry.cli.register_3dgs_background", fake_register)
+
+    code = main(["register-3dgs", "--run-dir", str(run), "--method", "camera-sim3", "--write"])
+
+    assert code == 0
+    assert seen == [(run, "camera-sim3", True)]
+
+
+def test_cli_qa_background_registration_writes_report(tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    run.mkdir()
+    seen = []
+
+    def fake_qa(run_dir, *, heldout_frames):  # noqa: ANN001
+        seen.append((run_dir, heldout_frames))
+        return {"status": "passed", "report_path": "qa/background_registration_report.json"}
+
+    monkeypatch.setattr("real2sim_scene_foundry.cli.qa_background_registration", fake_qa)
+
+    code = main(["qa-background-registration", "--run-dir", str(run), "--heldout-frames", "16"])
+
+    assert code == 0
+    assert seen == [(run, 16)]
 
 
 def test_cli_runtime_viewer_exports_genesis_runtime_bridge(tmp_path, monkeypatch):
@@ -312,6 +448,57 @@ def test_cli_runtime_viewer_exports_genesis_runtime_bridge(tmp_path, monkeypatch
 
     assert code == 0
     assert seen == [(run, "genesis")]
+
+
+def test_cli_genesis_settle_writeback_calls_postprocessor(tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    run.mkdir()
+    seen = []
+
+    def fake_writeback(run_dir, *, writeback):  # noqa: ANN001
+        seen.append((run_dir, writeback))
+        return {"status": "completed", "report_path": "qa/settled_pose_delta_report.json"}
+
+    monkeypatch.setattr("real2sim_scene_foundry.cli.apply_genesis_settle_writeback", fake_writeback)
+
+    code = main(["genesis-settle", "--run-dir", str(run), "--writeback"])
+
+    assert code == 0
+    assert seen == [(run, True)]
+
+
+def test_cli_build_collision_passes_backend_and_strict_provenance(tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    run.mkdir()
+    seen = []
+
+    def fake_build(run_dir, *, backend, strict_provenance):  # noqa: ANN001
+        seen.append((run_dir, backend, strict_provenance))
+        return {"status": "blocked", "report_path": "qa/collision_rebuild_report.json"}
+
+    monkeypatch.setattr("real2sim_scene_foundry.cli.build_collision_assets", fake_build)
+
+    code = main(["build-collision", "--run-dir", str(run), "--backend", "coacd", "--strict-provenance"])
+
+    assert code == 0
+    assert seen == [(run, "coacd", True)]
+
+
+def test_cli_qa_physics_calls_reporter(tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    run.mkdir()
+    seen = []
+
+    def fake_qa(run_dir):  # noqa: ANN001
+        seen.append(run_dir)
+        return {"status": "partial", "report_path": "qa/physics_property_report.json"}
+
+    monkeypatch.setattr("real2sim_scene_foundry.cli.qa_physics", fake_qa)
+
+    code = main(["qa-physics", "--run-dir", str(run)])
+
+    assert code == 0
+    assert seen == [run]
 
 
 def test_cli_extract_passes_http_inpaint_client(tmp_path, monkeypatch):

@@ -5,7 +5,13 @@ import pytest
 import trimesh
 from PIL import Image
 
-from real2sim_scene_foundry.pose_refinement import apply_visual_orientation_overrides, refine_visual_pose_to_masks, snap_object_poses_to_support
+from real2sim_scene_foundry.pose_refinement import (
+    apply_visual_orientation_overrides,
+    qa_object_alignment,
+    refine_pose_rgbd,
+    refine_visual_pose_to_masks,
+    snap_object_poses_to_support,
+)
 
 
 CAMERA_TO_WORLD = np.array(
@@ -204,6 +210,62 @@ def test_refine_visual_pose_to_masks_writes_asset_scale_and_keeps_support_contac
     assert object_report["scale_source"] == "reference_camera_bbox_refinement"
     assert object_report["reference_projection"]["mask_bbox_xyxy"] == [90, 45, 109, 64]
     assert object_report["asset_scale"] == pytest.approx(obj["asset_scale"])
+
+
+def test_refine_pose_rgbd_writes_fail_closed_object_alignment_reports(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _write_pose_refinement_run(run_dir)
+
+    result = refine_pose_rgbd(run_dir, frames="reference")
+
+    assert result.report_path == run_dir / "qa" / "object_pose_alignment_report.json"
+    assert result.report["status"] == "blocked"
+    obj_report = json.loads((run_dir / "objects" / "cup" / "pose_refinement_report.json").read_text(encoding="utf-8"))
+    assert obj_report["source"] == "rgbd_refined_from_auto"
+    assert obj_report["operation"] == "rgbd_mask_mesh_pose_verification"
+    assert obj_report["metrics"]["mask_iou_ref"] is None
+    assert obj_report["metrics"]["depth_median_abs_m"] is None
+    assert obj_report["metrics"]["support_gap_abs_m"] == pytest.approx(0.14)
+    assert obj_report["camera_source"] == "fallback"
+    assert "mask_iou_ref_unavailable" in obj_report["blocking_reasons"]
+    assert (run_dir / "objects" / "cup" / "pose_overlay_ref_frame.png").is_file()
+    assert (run_dir / "objects" / "cup" / "depth_residual_ref_frame.png").is_file()
+
+
+def test_qa_object_alignment_passes_when_reports_meet_rgbd_thresholds(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _write_pose_refinement_run(run_dir)
+    report_path = run_dir / "objects" / "cup" / "pose_refinement_report.json"
+    report_path.write_text(
+        json.dumps(
+            {
+                "status": "accepted",
+                "source": "rgbd_refined_from_auto",
+                "operation": "rgbd_mask_mesh_pose_verification",
+                "metrics": {
+                    "mask_iou_ref": 0.8,
+                    "depth_median_abs_m": 0.01,
+                    "depth_p90_abs_m": 0.03,
+                    "support_gap_abs_m": 0.001,
+                    "penetration_depth_m": 0.0,
+                    "projected_center_error_px": 4.0,
+                },
+                "scale_source": "rgbd_alignment",
+                "camera_source": "explicit",
+                "blocking_reasons": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = qa_object_alignment(run_dir)
+
+    assert report["status"] == "passed"
+    assert report["objects"][0]["object_id"] == "cup"
+    assert report["objects"][0]["status"] == "passed"
+    assert (run_dir / "qa" / "object_pose_alignment_report.json").is_file()
 
 
 def test_snap_after_support_change_records_current_visual_support_contact(tmp_path):

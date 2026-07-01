@@ -10,11 +10,17 @@ from PIL import Image
 
 from .background import HTTPInpaintClient
 from .camera import CameraIntrinsics
-from .composite_viewer import export_composite_viewer, serve_composite_viewer
+from .composite_viewer import export_composite_viewer, qa_viewer, serve_composite_viewer
 from .defaults import SAM3D_PROCESS_URL, SAM3_SEGMENT_URL
 from .interactive import export_interactive_scene
 from .pipeline import run_extract, run_reconstruct_align, run_smoke_reconstruction
-from .pose_refinement import apply_visual_orientation_overrides, refine_visual_pose_to_masks, snap_object_poses_to_support
+from .pose_refinement import (
+    apply_visual_orientation_overrides,
+    qa_object_alignment,
+    refine_pose_rgbd,
+    refine_visual_pose_to_masks,
+    snap_object_poses_to_support,
+)
 from .proposals import ObjectProposal, QwenProposalClient, load_object_proposals
 from .runtime_viewer import export_runtime_viewer
 from .support_plane import estimate_and_apply_support_plane
@@ -126,15 +132,30 @@ def main(argv: list[str] | None = None) -> int:
         print(f"pose_refinement status={result.report['status']}")
         print(f"wrote {result.report_path}")
         return 0
+    if args.command == "refine-pose-rgbd":
+        result = refine_pose_rgbd(args.run_dir, frames=args.frames)
+        print(f"pose_rgbd status={result.report['status']}")
+        print(f"wrote {result.report_path}")
+        return 0
+    if args.command == "qa-object-alignment":
+        report = qa_object_alignment(args.run_dir)
+        print(f"wrote {Path(args.run_dir) / str(report.get('report_path', 'qa/object_pose_alignment_report.json'))}")
+        print(f"status={report.get('status')}")
+        return 0
     if args.command == "composite-viewer":
-        result = export_composite_viewer(args.run_dir)
+        result = export_composite_viewer(args.run_dir, backend=args.backend, show_settled=args.show_settled)
         print(f"wrote {result.index_path}")
         print(f"wrote {result.config_path}")
         url = f"http://{args.host}:{int(args.port)}{result.url_path}"
         print(f"open {url}")
         if args.export_only:
             return 0
-        serve_composite_viewer(args.run_dir, host=args.host, port=args.port)
+        serve_composite_viewer(args.run_dir, host=args.host, port=args.port, backend=args.backend, show_settled=args.show_settled)
+        return 0
+    if args.command == "qa-viewer":
+        report = qa_viewer(args.run_dir)
+        print(f"wrote {Path(args.run_dir) / str(report.get('report_path', 'qa/viewer_audit.json'))}")
+        print(f"status={report.get('status')}")
         return 0
     if args.command == "runtime-viewer":
         result = export_runtime_viewer(args.run_dir, backend=args.backend)
@@ -161,6 +182,25 @@ def main(argv: list[str] | None = None) -> int:
                     str(int(args.port)),
                 ]
             )
+        return 0
+    if args.command == "genesis-settle":
+        report = apply_genesis_settle_writeback(args.run_dir, writeback=args.writeback)
+        print(f"wrote {Path(args.run_dir) / str(report.get('report_path', 'qa/genesis_settle_writeback_report.json'))}")
+        print(f"status={report.get('status')}")
+        return 0
+    if args.command == "build-collision":
+        report = build_collision_assets(
+            args.run_dir,
+            backend=args.backend,
+            strict_provenance=args.strict_provenance,
+        )
+        print(f"wrote {Path(args.run_dir) / str(report.get('report_path', 'qa/collision_rebuild_report.json'))}")
+        print(f"status={report.get('status')}")
+        return 0
+    if args.command == "qa-physics":
+        report = qa_physics(args.run_dir)
+        print(f"wrote {Path(args.run_dir) / str(report.get('report_path', 'qa/physics_property_report.json'))}")
+        print(f"status={report.get('status')}")
         return 0
     if args.command == "video-prep":
         result = prepare_rgb_video(
@@ -223,13 +263,23 @@ def main(argv: list[str] | None = None) -> int:
         print(f"wrote {result.report_path}")
         print(f"status={result.report.get('status')}")
         return 0
+    if args.command == "register-3dgs":
+        result = register_3dgs_background(args.run_dir, method=args.method, write=args.write)
+        print(f"wrote {result.path}")
+        print(f"status={result.data.get('status')}")
+        return 0
+    if args.command == "qa-background-registration":
+        report = qa_background_registration(args.run_dir, heldout_frames=args.heldout_frames)
+        print(f"wrote {Path(args.run_dir) / 'qa' / 'background_registration_report.json'}")
+        print(f"status={report.get('status')}")
+        return 0
     if args.command == "export-sim":
         artifacts = export_sim(args.run_dir, backends=args.backend)
         for name, path in artifacts.items():
             print(f"wrote {name}: {path}")
         return 0
     if args.command == "qa-sim":
-        report_path = run_export_qa(args.run_dir)
+        report_path = run_export_qa(args.run_dir, strict_claims=args.strict_claims)
         print(f"wrote {report_path}")
         return 0
     parser.error(f"{args.command} is scaffolded but not implemented in V1")
@@ -247,8 +297,14 @@ def build_parser() -> argparse.ArgumentParser:
     _add_interactive_parser(subparsers, "interactive")
     _add_support_plane_parser(subparsers)
     _add_refine_pose_parser(subparsers)
+    _add_refine_pose_rgbd_parser(subparsers)
+    _add_qa_object_alignment_parser(subparsers)
     _add_composite_viewer_parser(subparsers)
+    _add_qa_viewer_parser(subparsers)
     _add_runtime_viewer_parser(subparsers)
+    _add_genesis_settle_parser(subparsers)
+    _add_build_collision_parser(subparsers)
+    _add_qa_physics_parser(subparsers)
     _add_video_prep_parser(subparsers, "video-prep")
     _add_video_scene_parser(subparsers, "video-scene")
     _add_export_manifest_parser(subparsers)
@@ -257,6 +313,8 @@ def build_parser() -> argparse.ArgumentParser:
     _add_isaac_worker_bundle_parser(subparsers)
     _add_isaac_worker_report_parser(subparsers)
     _add_render_3dgs_background_parser(subparsers)
+    _add_register_3dgs_parser(subparsers)
+    _add_qa_background_registration_parser(subparsers)
     for name in ("export", "render"):
         subparsers.add_parser(name)
     return parser
@@ -325,12 +383,30 @@ def _add_refine_pose_parser(subparsers: argparse._SubParsersAction) -> None:
     )
 
 
+def _add_refine_pose_rgbd_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser("refine-pose-rgbd")
+    parser.add_argument("--run-dir", required=True, type=Path)
+    parser.add_argument("--frames", default="reference")
+
+
+def _add_qa_object_alignment_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser("qa-object-alignment")
+    parser.add_argument("--run-dir", required=True, type=Path)
+
+
 def _add_composite_viewer_parser(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser("composite-viewer")
     parser.add_argument("--run-dir", required=True, type=Path)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7010)
+    parser.add_argument("--backend", choices=("external-sidecar", "browser-3dgs"), default="external-sidecar")
+    parser.add_argument("--show-settled", action="store_true")
     parser.add_argument("--export-only", action="store_true")
+
+
+def _add_qa_viewer_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser("qa-viewer")
+    parser.add_argument("--run-dir", required=True, type=Path)
 
 
 def _add_runtime_viewer_parser(subparsers: argparse._SubParsersAction) -> None:
@@ -340,6 +416,24 @@ def _add_runtime_viewer_parser(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7030)
     parser.add_argument("--serve", action="store_true", help="Start the runtime server after exporting")
+
+
+def _add_genesis_settle_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser("genesis-settle")
+    parser.add_argument("--run-dir", required=True, type=Path)
+    parser.add_argument("--writeback", action="store_true")
+
+
+def _add_build_collision_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser("build-collision")
+    parser.add_argument("--run-dir", required=True, type=Path)
+    parser.add_argument("--backend", choices=("convex-hull", "coacd"), default="convex-hull")
+    parser.add_argument("--strict-provenance", action="store_true")
+
+
+def _add_qa_physics_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser("qa-physics")
+    parser.add_argument("--run-dir", required=True, type=Path)
 
 
 def _add_video_prep_parser(subparsers: argparse._SubParsersAction, name: str) -> None:
@@ -379,6 +473,8 @@ def _add_export_sim_parser(subparsers: argparse._SubParsersAction) -> None:
 def _add_qa_sim_parser(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser("qa-sim")
     parser.add_argument("--run-dir", required=True, type=Path)
+    parser.add_argument("--strict-claims", dest="strict_claims", action="store_true", default=True)
+    parser.add_argument("--no-strict-claims", dest="strict_claims", action="store_false")
 
 
 def _add_isaac_worker_bundle_parser(subparsers: argparse._SubParsersAction) -> None:
@@ -404,6 +500,19 @@ def _add_render_3dgs_background_parser(subparsers: argparse._SubParsersAction) -
     parser.add_argument("--renderer-executable", default=None, type=Path)
     parser.add_argument("--split", default="test")
     parser.add_argument("--camera-idx", type=int, default=0)
+
+
+def _add_register_3dgs_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser("register-3dgs")
+    parser.add_argument("--run-dir", required=True, type=Path)
+    parser.add_argument("--method", choices=("camera-sim3",), default="camera-sim3")
+    parser.add_argument("--write", action="store_true")
+
+
+def _add_qa_background_registration_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser("qa-background-registration")
+    parser.add_argument("--run-dir", required=True, type=Path)
+    parser.add_argument("--heldout-frames", type=int, default=16)
 
 
 def _add_stereo_args(parser: argparse.ArgumentParser) -> None:
@@ -557,10 +666,10 @@ def export_sim(run_dir: str | Path, *, backends: list[str]) -> dict[str, Path]:
     return impl(run_dir, backends=backends)
 
 
-def run_export_qa(run_dir: str | Path) -> Path:
+def run_export_qa(run_dir: str | Path, *, strict_claims: bool = False) -> Path:
     from .export_qa import run_export_qa as impl
 
-    return impl(run_dir)
+    return impl(run_dir, strict_claims=strict_claims)
 
 
 def build_isaac_worker_bundle(run_dir: str | Path, **kwargs):
@@ -579,6 +688,41 @@ def render_external_3dgs_background(run_dir: str | Path, **kwargs):
     from .background_3dgs_render import render_external_3dgs_background as impl
 
     return impl(run_dir, **kwargs)
+
+
+def register_3dgs_background(run_dir: str | Path, *, method: str = "camera-sim3", write: bool = True):
+    from .background_registration import register_3dgs_background as impl
+
+    return impl(run_dir, method=method, write=write)
+
+
+def qa_background_registration(run_dir: str | Path, *, heldout_frames: int = 16) -> dict:
+    from .background_registration import qa_background_registration as impl
+
+    return impl(run_dir, heldout_frames=heldout_frames)
+
+
+def apply_genesis_settle_writeback(run_dir: str | Path, *, writeback: bool = False) -> dict:
+    from .genesis_export import apply_genesis_settle_writeback as impl
+
+    return impl(run_dir, writeback=writeback)
+
+
+def build_collision_assets(
+    run_dir: str | Path,
+    *,
+    backend: str = "convex-hull",
+    strict_provenance: bool = False,
+) -> dict:
+    from .collision_assets import ensure_collision_assets as impl
+
+    return impl(run_dir, backend=backend, strict_provenance=strict_provenance)
+
+
+def qa_physics(run_dir: str | Path) -> dict:
+    from .collision_assets import qa_physics as impl
+
+    return impl(run_dir)
 
 
 if __name__ == "__main__":

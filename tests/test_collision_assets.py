@@ -3,7 +3,7 @@ from pathlib import Path
 
 import trimesh
 
-from real2sim_scene_foundry.collision_assets import ensure_collision_assets
+from real2sim_scene_foundry.collision_assets import ensure_collision_assets, qa_physics
 
 
 def _write_legacy_run(run_dir: Path, *, mesh_name: str = "mesh_aligned.glb") -> None:
@@ -249,3 +249,44 @@ def test_explicit_heuristic_physics_source_is_not_promoted_to_inference(tmp_path
     encoded = json.dumps(report).lower()
     assert "inferred" not in encoded
     assert '"reproduced"' not in encoded
+
+
+def test_strict_coacd_request_blocks_paper_equivalence_without_backend_integration(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _write_legacy_run(run_dir, mesh_name="visual.glb")
+    trimesh.creation.icosphere(subdivisions=1, radius=0.1).export(run_dir / "objects/cup/visual.glb")
+
+    report = ensure_collision_assets(run_dir, backend="coacd", strict_provenance=True)
+
+    assert report["backend_requested"] == "coacd"
+    assert report["strict_provenance"] is True
+    assert report["status"] == "blocked"
+    assert report["interactive_status"] == "usable"
+    assert report["paper_equivalence_status"] == "blocked"
+    assert any(reason.startswith("coacd_") for reason in report["blocking_for_paper"])
+    object_report = json.loads((run_dir / "objects/cup/collision_report.json").read_text(encoding="utf-8"))
+    assert object_report["backend_requested"] == "coacd"
+    assert object_report["status"] == "blocked"
+    assert object_report["interactive_status"] == "usable"
+    assert object_report["paper_equivalence_status"] == "blocked"
+    assert object_report["decomposition_backend"] == "trimesh_convex_hull"
+
+
+def test_qa_physics_reports_interactive_usable_but_paper_partial_for_manifest_fields(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _write_legacy_run(run_dir)
+    ensure_collision_assets(run_dir)
+
+    report = qa_physics(run_dir)
+
+    assert report["status"] == "partial"
+    assert report["interactive_status"] == "usable"
+    assert report["paper_equivalence_status"] == "partial"
+    assert report["report_path"] == "qa/physics_property_report.json"
+    assert "mass_kg_source_not_vlm_inference:scene_manifest_physics_fields" in report["blocking_for_paper"]
+    obj = report["objects"][0]
+    assert obj["interactive_status"] == "usable"
+    assert obj["paper_equivalence_status"] == "partial"
+    assert obj["source_category"] == "scene_manifest_physics_fields"

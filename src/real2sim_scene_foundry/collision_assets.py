@@ -21,7 +21,12 @@ PHYSICS_SOURCE_CATEGORIES = {
 }
 
 
-def ensure_collision_assets(run_dir: str | Path) -> dict[str, Any]:
+def ensure_collision_assets(
+    run_dir: str | Path,
+    *,
+    backend: str = "convex-hull",
+    strict_provenance: bool = False,
+) -> dict[str, Any]:
     """Ensure every manifest object has visual/collision/debug/physics roles.
 
     Existing legacy ``mesh_path`` values are preserved for backward compatibility,
@@ -29,22 +34,76 @@ def ensure_collision_assets(run_dir: str | Path) -> dict[str, Any]:
     provenance is recorded in both the scene manifest and ``physics.json``.
     """
     run = Path(run_dir)
+    backend_requested = _normalise_collision_backend(backend)
     manifest_path = run / "scene_manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     object_reports = []
     for item in manifest.get("objects", []):
-        object_reports.append(_ensure_object_assets(run, item))
+        object_reports.append(
+            _ensure_object_assets(
+                run,
+                item,
+                backend_requested=backend_requested,
+                strict_provenance=strict_provenance,
+            )
+        )
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     qa_dir = run / "qa"
     qa_dir.mkdir(parents=True, exist_ok=True)
-    collision_report = _collision_rebuild_report(object_reports)
+    collision_report = _collision_rebuild_report(
+        object_reports,
+        backend_requested=backend_requested,
+        strict_provenance=strict_provenance,
+    )
+    collision_report["report_path"] = "qa/collision_rebuild_report.json"
     (qa_dir / "collision_rebuild_report.json").write_text(json.dumps(collision_report, indent=2), encoding="utf-8")
     physics_report = _physics_property_report(object_reports)
     (qa_dir / "physics_property_report.json").write_text(json.dumps(physics_report, indent=2), encoding="utf-8")
     return collision_report
 
 
-def _ensure_object_assets(run: Path, item: dict[str, Any]) -> dict[str, Any]:
+def qa_physics(run_dir: str | Path) -> dict[str, Any]:
+    """Write a standalone physics provenance report from object ``physics.json`` files."""
+    run = Path(run_dir)
+    manifest = json.loads((run / "scene_manifest.json").read_text(encoding="utf-8"))
+    object_reports = []
+    for item in manifest.get("objects", []):
+        object_id = str(item["object_id"])
+        object_dir = run / "objects" / object_id
+        physics_path = _physics_path_from_manifest(run, object_dir, item)
+        physics = _read_physics_record(physics_path, object_id, item)
+        collision_report_path = object_dir / "collision_report.json"
+        if collision_report_path.is_file():
+            collision_report = json.loads(collision_report_path.read_text(encoding="utf-8"))
+        else:
+            collision_report = {
+                "paper_equivalent": False,
+                "reproduction_status": "blocked",
+                "decomposition_backend": "missing_collision_report",
+            }
+        object_reports.append(
+            {
+                "object_id": object_id,
+                "physics": physics,
+                "paper_equivalent": bool(collision_report.get("paper_equivalent")),
+                "collision_report": collision_report,
+            }
+        )
+    report = _physics_property_report(object_reports)
+    report["report_path"] = "qa/physics_property_report.json"
+    qa_dir = run / "qa"
+    qa_dir.mkdir(parents=True, exist_ok=True)
+    (qa_dir / "physics_property_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    return report
+
+
+def _ensure_object_assets(
+    run: Path,
+    item: dict[str, Any],
+    *,
+    backend_requested: str,
+    strict_provenance: bool,
+) -> dict[str, Any]:
     object_id = str(item["object_id"])
     object_dir = run / "objects" / object_id
     object_dir.mkdir(parents=True, exist_ok=True)
@@ -52,9 +111,26 @@ def _ensure_object_assets(run: Path, item: dict[str, Any]) -> dict[str, Any]:
     item["visual_asset"] = visual
     debug_proxy = _write_debug_proxy(run, object_dir, item, visual)
     item["debug_proxy"] = debug_proxy
-    collision = _write_collision_asset(run, object_dir, item, visual, debug_proxy)
+    collision = _write_collision_asset(
+        run,
+        object_dir,
+        item,
+        visual,
+        debug_proxy,
+        backend_requested=backend_requested,
+        strict_provenance=strict_provenance,
+    )
     item["collision_asset"] = collision
-    collision_report = _write_collision_report(run, object_dir, object_id, visual, collision, debug_proxy)
+    collision_report = _write_collision_report(
+        run,
+        object_dir,
+        object_id,
+        visual,
+        collision,
+        debug_proxy,
+        backend_requested=backend_requested,
+        strict_provenance=strict_provenance,
+    )
     physics = _write_physics_json(run, object_dir, item, visual, collision, debug_proxy)
     item["physics"] = physics
     return {
@@ -162,6 +238,9 @@ def _write_collision_asset(
     item: dict[str, Any],
     visual: dict[str, Any],
     debug_proxy: dict[str, Any],
+    *,
+    backend_requested: str,
+    strict_provenance: bool,
 ) -> dict[str, Any]:
     existing = item.get("collision_asset")
     if isinstance(existing, dict) and existing.get("path") and existing.get("path") != visual.get("path"):
@@ -177,6 +256,8 @@ def _write_collision_asset(
             collision.setdefault("source", "manifest_collision_asset")
             collision.setdefault("status", "ready")
             collision.setdefault("provenance", {})
+            collision.setdefault("backend_requested", backend_requested)
+            collision.setdefault("strict_provenance", strict_provenance)
             return collision
 
     collision_path = object_dir / "collision.glb"
@@ -210,10 +291,14 @@ def _write_collision_asset(
         "decomposition_backend": decomposition_backend,
         "paper_equivalent": paper_equivalent,
         "reproduction_status": "reproduced" if paper_equivalent else "partial",
+        "backend_requested": backend_requested,
+        "strict_provenance": strict_provenance,
         "provenance": {
             "method": method,
             "visual_asset_path": visual.get("path"),
             "debug_proxy_path": debug_proxy.get("path"),
+            "backend_requested": backend_requested,
+            "strict_provenance": strict_provenance,
         },
     }
 
@@ -251,6 +336,9 @@ def _write_physics_json(
         "status": "ready",
         "paper_equivalent": paper_equivalent,
         "reproduction_status": "reproduced" if paper_equivalent else "partial",
+        "interactive_status": "usable",
+        "paper_equivalence_status": "reproduced" if paper_equivalent else "partial",
+        "blocking_for_paper": [] if paper_equivalent else _physics_not_paper_equivalent_reasons(field_sources),
         "not_paper_equivalent_reasons": [] if paper_equivalent else _physics_not_paper_equivalent_reasons(field_sources),
         "visual_asset": visual,
         "collision_asset": collision,
@@ -271,6 +359,9 @@ def _write_collision_report(
     visual: dict[str, Any],
     collision: dict[str, Any],
     debug_proxy: dict[str, Any],
+    *,
+    backend_requested: str,
+    strict_provenance: bool,
 ) -> dict[str, Any]:
     availability = _collision_backend_availability()
     source = str(collision.get("source", "unknown"))
@@ -278,22 +369,42 @@ def _write_collision_report(
     decomposition_backend = _collision_decomposition_backend(source, method)
     paper_equivalent = _collision_paper_equivalent(source, decomposition_backend)
     asset_ready = collision.get("status") == "ready"
+    blocking_for_paper = _collision_not_paper_equivalent_reasons(
+        source,
+        decomposition_backend,
+        paper_equivalent=paper_equivalent,
+        availability=availability,
+    )
+    if strict_provenance and backend_requested == "coacd" and decomposition_backend != "coacd":
+        blocking_for_paper = _dedupe(blocking_for_paper + _coacd_strict_blocking_reasons(availability))
+    interactive_status = "usable" if asset_ready else "blocked"
     if not asset_ready:
         status = "blocked"
         reproduction_status = "blocked"
+        paper_equivalence_status = "blocked"
+    elif strict_provenance and backend_requested == "coacd" and decomposition_backend != "coacd":
+        status = "blocked"
+        reproduction_status = "blocked"
+        paper_equivalence_status = "blocked"
     elif paper_equivalent:
         status = "reproduced"
         reproduction_status = "reproduced"
+        paper_equivalence_status = "reproduced"
     else:
         status = "partial"
         reproduction_status = "partial"
+        paper_equivalence_status = "partial"
     report = {
         "version": 1,
         "object_id": object_id,
         "status": status,
         "asset_status": collision.get("status"),
+        "interactive_status": interactive_status,
+        "paper_equivalence_status": paper_equivalence_status,
         "reproduction_status": reproduction_status,
         "paper_equivalent": paper_equivalent,
+        "backend_requested": backend_requested,
+        "strict_provenance": strict_provenance,
         "simfoundry_target_backend": "coacd",
         "collision_source": source,
         "decomposition_backend": decomposition_backend,
@@ -302,12 +413,8 @@ def _write_collision_report(
         "visual_asset_path": visual.get("path"),
         "debug_proxy_path": debug_proxy.get("path"),
         "availability": availability,
-        "not_paper_equivalent_reasons": _collision_not_paper_equivalent_reasons(
-            source,
-            decomposition_backend,
-            paper_equivalent=paper_equivalent,
-            availability=availability,
-        ),
+        "blocking_for_paper": blocking_for_paper,
+        "not_paper_equivalent_reasons": blocking_for_paper,
     }
     path = object_dir / "collision_report.json"
     path.write_text(json.dumps(report, indent=2), encoding="utf-8")
@@ -316,7 +423,12 @@ def _write_collision_report(
     return record
 
 
-def _collision_rebuild_report(object_reports: list[dict[str, Any]]) -> dict[str, Any]:
+def _collision_rebuild_report(
+    object_reports: list[dict[str, Any]],
+    *,
+    backend_requested: str,
+    strict_provenance: bool,
+) -> dict[str, Any]:
     reports = [dict(item["collision_report"]) for item in object_reports]
     if any(item["reproduction_status"] == "blocked" for item in reports):
         status = "blocked"
@@ -324,19 +436,40 @@ def _collision_rebuild_report(object_reports: list[dict[str, Any]]) -> dict[str,
         status = "reproduced"
     else:
         status = "partial"
+    if any(item.get("interactive_status") != "usable" for item in reports):
+        interactive_status = "blocked"
+    else:
+        interactive_status = "usable" if reports else "blocked"
+    if any(item.get("paper_equivalence_status") == "blocked" for item in reports):
+        paper_equivalence_status = "blocked"
+    elif reports and all(item.get("paper_equivalence_status") == "reproduced" for item in reports):
+        paper_equivalence_status = "reproduced"
+    else:
+        paper_equivalence_status = "partial"
+    blocking_for_paper = _dedupe(
+        [
+            reason
+            for item in reports
+            for reason in item.get("blocking_for_paper", item.get("not_paper_equivalent_reasons", []))
+        ]
+    )
     return {
         "version": 1,
         "status": status,
+        "interactive_status": interactive_status,
+        "paper_equivalence_status": paper_equivalence_status,
         "reproduction_status": status,
         "paper_equivalent": bool(reports) and all(item["paper_equivalent"] for item in reports),
+        "backend_requested": backend_requested,
+        "strict_provenance": strict_provenance,
         "simfoundry_target_backend": "coacd",
         "availability": _collision_backend_availability(),
         "objects": object_reports,
         "collision_reports": reports,
         "collision_decomposition_backends": sorted({str(item["decomposition_backend"]) for item in reports}),
-        "not_paper_equivalent_reasons": _dedupe(
-            [reason for item in reports for reason in item.get("not_paper_equivalent_reasons", [])]
-        ),
+        "report_path": "qa/collision_rebuild_report.json",
+        "blocking_for_paper": blocking_for_paper,
+        "not_paper_equivalent_reasons": blocking_for_paper,
     }
 
 
@@ -350,6 +483,7 @@ def _physics_property_report(object_reports: list[dict[str, Any]]) -> dict[str, 
             "object_id": item["object_id"],
             "label": physics.get("label"),
             "status": physics.get("status"),
+            "interactive_status": "usable" if physics.get("status") == "ready" else "blocked",
             "mass_kg": physics.get("mass_kg"),
             "friction": physics.get("friction"),
             "restitution": physics.get("restitution"),
@@ -358,7 +492,9 @@ def _physics_property_report(object_reports: list[dict[str, Any]]) -> dict[str, 
             "restitution_source_category": _property_source_category(property_sources, "restitution"),
             "source_category": physics.get("source_category"),
             "paper_equivalent": physics.get("paper_equivalent"),
+            "paper_equivalence_status": "reproduced" if physics.get("paper_equivalent") is True else "partial",
             "reproduction_status": physics.get("reproduction_status"),
+            "blocking_for_paper": physics.get("blocking_for_paper", physics.get("not_paper_equivalent_reasons", [])),
             "collision_source": physics.get("collision_source"),
             "collision_decomposition_backend": physics.get("collision_decomposition_backend"),
             "collision_paper_equivalent": item.get("paper_equivalent"),
@@ -373,17 +509,28 @@ def _physics_property_report(object_reports: list[dict[str, Any]]) -> dict[str, 
         status = "reproduced"
     else:
         status = "partial"
+    interactive_status = "usable" if objects and all(item.get("interactive_status") == "usable" for item in objects) else "blocked"
+    if status == "blocked":
+        paper_equivalence_status = "blocked"
+    elif objects and all(item.get("paper_equivalent") is True for item in objects):
+        paper_equivalence_status = "reproduced"
+    else:
+        paper_equivalence_status = "partial"
+    blocking_for_paper = _dedupe(
+        [reason for item in objects for reason in item.get("blocking_for_paper", [])]
+    )
     return {
         "version": 1,
         "status": status,
+        "interactive_status": interactive_status,
+        "paper_equivalence_status": paper_equivalence_status,
         "reproduction_status": status,
         "paper_equivalent": bool(objects) and all(item.get("paper_equivalent") is True for item in objects),
         "allowed_source_categories": sorted(PHYSICS_SOURCE_CATEGORIES),
         "source_summary": source_summary,
         "objects": objects,
-        "not_paper_equivalent_reasons": _dedupe(
-            [reason for item in object_reports for reason in item["physics"].get("not_paper_equivalent_reasons", [])]
-        ),
+        "blocking_for_paper": blocking_for_paper,
+        "not_paper_equivalent_reasons": blocking_for_paper,
     }
 
 
@@ -392,6 +539,34 @@ def _property_source_category(property_sources: dict[str, Any], field: str) -> s
     if isinstance(source, dict):
         return str(source.get("category", "heuristic"))
     return "heuristic"
+
+
+def _physics_path_from_manifest(run: Path, object_dir: Path, item: dict[str, Any]) -> Path:
+    physics = item.get("physics") if isinstance(item.get("physics"), dict) else {}
+    if physics.get("path"):
+        path = run / str(physics["path"])
+        if path.is_file():
+            return path
+    return object_dir / "physics.json"
+
+
+def _read_physics_record(path: Path, object_id: str, item: dict[str, Any]) -> dict[str, Any]:
+    if path.is_file():
+        return json.loads(path.read_text(encoding="utf-8"))
+    return {
+        "version": 1,
+        "object_id": object_id,
+        "label": str(item.get("label", object_id)),
+        "status": "missing",
+        "source_category": "heuristic",
+        "property_sources": {},
+        "paper_equivalent": False,
+        "reproduction_status": "blocked",
+        "interactive_status": "blocked",
+        "paper_equivalence_status": "blocked",
+        "blocking_for_paper": ["missing_physics_json"],
+        "not_paper_equivalent_reasons": ["missing_physics_json"],
+    }
 
 
 def _physics_property_source(item: dict[str, Any], field: str) -> dict[str, str]:
@@ -469,6 +644,15 @@ def _physics_not_paper_equivalent_reasons(field_sources: dict[str, dict[str, str
     return reasons
 
 
+def _normalise_collision_backend(value: object) -> str:
+    raw = str(value or "convex-hull").strip().lower().replace("_", "-")
+    if raw in {"convex", "convex-hull", "trimesh-convex-hull"}:
+        return "convex-hull"
+    if raw == "coacd":
+        return "coacd"
+    return raw
+
+
 def _collision_backend_availability() -> dict[str, dict[str, Any]]:
     coacd_executable = shutil.which("coacd")
     vhacd_executable = shutil.which("vhacd")
@@ -488,6 +672,12 @@ def _collision_backend_availability() -> dict[str, dict[str, Any]]:
             "testVHACD_executable": test_vhacd_executable,
         },
     }
+
+
+def _coacd_strict_blocking_reasons(availability: dict[str, dict[str, Any]]) -> list[str]:
+    if availability.get("coacd", {}).get("available"):
+        return ["coacd_backend_not_integrated"]
+    return ["coacd_runtime_unavailable"]
 
 
 def _collision_decomposition_backend(source: str, method: str) -> str:

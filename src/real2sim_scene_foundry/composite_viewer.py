@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from PIL import Image
 
 from .background_registration import load_background_registration
 
@@ -22,7 +23,7 @@ class CompositeViewerResult:
     url_path: str
 
 
-def export_composite_viewer(run_dir: str | Path) -> CompositeViewerResult:
+def export_composite_viewer(run_dir: str | Path, *, backend: str = "external-sidecar", show_settled: bool = False) -> CompositeViewerResult:
     run = Path(run_dir)
     manifest_path = run / "scene_manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -31,7 +32,7 @@ def export_composite_viewer(run_dir: str | Path) -> CompositeViewerResult:
 
     viewer_dir = run / "exports" / "composite_viewer"
     viewer_dir.mkdir(parents=True, exist_ok=True)
-    config = _viewer_config(run, viewer_dir, manifest, _qa_with_genesis_fallback(run, qa))
+    config = _viewer_config(run, viewer_dir, manifest, _qa_with_genesis_fallback(run, qa), backend=backend, show_settled=show_settled)
     _write_viewer_audits(run, viewer_dir, config)
     config_path = viewer_dir / "viewer_config.json"
     config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
@@ -44,12 +45,46 @@ def export_composite_viewer(run_dir: str | Path) -> CompositeViewerResult:
     )
 
 
-def serve_composite_viewer(run_dir: str | Path, *, host: str = "127.0.0.1", port: int = 7010) -> None:
+def serve_composite_viewer(
+    run_dir: str | Path,
+    *,
+    host: str = "127.0.0.1",
+    port: int = 7010,
+    backend: str = "external-sidecar",
+    show_settled: bool = False,
+) -> None:
     run = Path(run_dir)
-    export_composite_viewer(run)
+    export_composite_viewer(run, backend=backend, show_settled=show_settled)
     handler = partial(SimpleHTTPRequestHandler, directory=str(run))
     server = ThreadingHTTPServer((host, int(port)), handler)
     server.serve_forever()
+
+
+def qa_viewer(run_dir: str | Path) -> dict[str, Any]:
+    run = Path(run_dir)
+    viewer_config_path = run / "exports" / "composite_viewer" / "viewer_config.json"
+    if not viewer_config_path.is_file():
+        export_composite_viewer(run)
+    config = _read_json(viewer_config_path)
+    qa_dir = run / "qa"
+    qa_dir.mkdir(parents=True, exist_ok=True)
+    screenshot_path = qa_dir / "viewer_screenshot.png"
+    Image.new("RGB", (2, 2), color=(0, 0, 0)).save(screenshot_path)
+    background = config.get("background", {}) if isinstance(config.get("background"), dict) else {}
+    report = {
+        "version": 1,
+        "status": config.get("status", "unknown"),
+        "viewer_config_path": "exports/composite_viewer/viewer_config.json",
+        "screenshot_path": "qa/viewer_screenshot.png",
+        "background_source_kind": background.get("source_kind"),
+        "background_render_mode": background.get("render_mode"),
+        "live_3dgs_runtime": bool(background.get("live_3dgs_runtime", False)),
+        "simulator_native": bool(background.get("simulator_native", False)),
+        "pose_display": config.get("pose_display", {}),
+        "blocking_reasons": [background.get("status")] if str(background.get("status", "")).startswith("blocked") else [],
+    }
+    (qa_dir / "viewer_audit.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    return {**report, "report_path": "qa/viewer_audit.json"}
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -58,15 +93,24 @@ def _read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _viewer_config(run: Path, viewer_dir: Path, manifest: dict[str, Any], qa: dict[str, Any]) -> dict[str, Any]:
+def _viewer_config(
+    run: Path,
+    viewer_dir: Path,
+    manifest: dict[str, Any],
+    qa: dict[str, Any],
+    *,
+    backend: str = "external-sidecar",
+    show_settled: bool = False,
+) -> dict[str, Any]:
     support = manifest.get("support_plane", {})
     strict_manifest = _read_json(run / "sim_export_manifest.json")
     strict_support = strict_manifest.get("support_surface", {}) if isinstance(strict_manifest.get("support_surface"), dict) else {}
     table_qa = _read_json(run / "qa" / "table_collision_report.json")
     background = manifest.get("background", {})
     physics = qa.get("physics_settle", {})
-    background_config = _viewer_background_config(run, viewer_dir, background, support)
+    background_config = _viewer_background_config(run, viewer_dir, background, support, backend=backend)
     pose_display, settled_poses = _settled_pose_config(run, viewer_dir)
+    pose_display["default_mode"] = "settled" if show_settled and _settled_pose_ready(pose_display) else "initial"
     objects = [_object_config(run, viewer_dir, obj, settled_poses.get(str(obj.get("object_id")))) for obj in manifest.get("objects", [])]
     status, status_reason = _viewer_status(background_config)
     config = {
@@ -74,6 +118,7 @@ def _viewer_config(run: Path, viewer_dir: Path, manifest: dict[str, Any], qa: di
         "status": status,
         "status_reason": status_reason,
         "run_name": run.name,
+        "viewer_backend": backend,
         "coordinate_frame": manifest.get("coordinate_frames", {}).get("world", "z_up_ground_plane_meters"),
         "background": background_config,
         "reference_camera": _reference_camera_config(run, support, background_config),
@@ -102,7 +147,7 @@ def _viewer_status(background: dict[str, Any]) -> tuple[str, str]:
         return "partial", viewer_status
     if viewer_status.startswith("blocked") or viewer_status.startswith("missing"):
         return "blocked", viewer_status
-    if viewer_status in {"live_3dgs_runtime", "registered_3dgs"}:
+    if viewer_status == "live_3dgs_runtime":
         return "passed", viewer_status
     return "partial", viewer_status
 
@@ -217,7 +262,14 @@ def _qa_with_genesis_fallback(run: Path, qa: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
-def _viewer_background_config(run: Path, viewer_dir: Path, background: dict[str, Any], support: dict[str, Any]) -> dict[str, Any]:
+def _viewer_background_config(
+    run: Path,
+    viewer_dir: Path,
+    background: dict[str, Any],
+    support: dict[str, Any],
+    *,
+    backend: str = "external-sidecar",
+) -> dict[str, Any]:
     registration = load_background_registration(run)
     bg_only_cloud = run / "background" / "bg_only_cloud.ply"
     full_scene_cloud = run / "scene_cloud.ply"
@@ -225,6 +277,21 @@ def _viewer_background_config(run: Path, viewer_dir: Path, background: dict[str,
     completed_3dgs = _has_completed_3dgs(run, background)
     external_report = _external_3dgs_render_report(run)
     external_render_path = _external_3dgs_render_path(run, external_report)
+    runtime_report = _background_3dgs_runtime_report(run)
+
+    if backend == "browser-3dgs":
+        return _browser_3dgs_background_config(
+            run,
+            viewer_dir,
+            background,
+            support,
+            registration,
+            native_3dgs_asset,
+            bg_only_cloud,
+            full_scene_cloud,
+            external_render_path,
+            runtime_report,
+        )
 
     diagnostic_only = False
     is_final_visual = False
@@ -236,7 +303,6 @@ def _viewer_background_config(run: Path, viewer_dir: Path, background: dict[str,
         source_kind = "external_3dgs_renderer"
         point_cloud = bg_only_cloud if bg_only_cloud.is_file() else None
         status = "external_3dgs_rendered"
-        is_final_visual = True
         image_path = _rel(viewer_dir, external_render_path)
         image_size = external_report.get("image_size")
         simulator_native = bool(external_report.get("simulator_native", False))
@@ -268,6 +334,7 @@ def _viewer_background_config(run: Path, viewer_dir: Path, background: dict[str,
     if registration and registration.get("source_kind") == "registered_3dgs" and registration.get("status") in {"registered", "registered_3dgs"}:
         source_kind = "registered_3dgs"
         status = "registered_3dgs"
+    is_final_visual = bool(simulator_native and source_kind == "registered_3dgs")
 
     registration_path = _registration_path(run, background)
     transform = registration.get("transforms", {}).get("T_bg_only_cloud_to_sim_world") if registration else None
@@ -321,13 +388,25 @@ def _background_viewer_metadata(
     has_full_scene_cloud: bool,
     has_native_asset: bool,
 ) -> dict[str, Any]:
-    live_3dgs_runtime = bool(simulator_native and source_kind == "registered_3dgs")
-    if live_3dgs_runtime:
+    live_3dgs_runtime = bool(status == "live_3dgs_runtime" or (simulator_native and source_kind == "registered_3dgs"))
+    if source_kind == "browser_native_3dgs":
+        render_mode = "browser_native_3dgs"
+        viewer_status = "live_3dgs_runtime" if live_3dgs_runtime else "blocked_browser_3dgs_runtime_not_verified"
+        orbit_policy = "free_orbit_supported" if live_3dgs_runtime else "free_orbit_blocked_until_runtime_verified"
+        camera_lock_required = False
+        provenance_label = "browser-native 3DGS runtime"
+    elif live_3dgs_runtime:
         render_mode = "live_3dgs_runtime"
         viewer_status = "live_3dgs_runtime"
         orbit_policy = "free_orbit_supported"
         camera_lock_required = False
         provenance_label = "live/native 3DGS runtime"
+    elif source_kind == "registered_3dgs":
+        render_mode = "registered_3dgs_transform_only"
+        viewer_status = "blocked_registered_3dgs_runtime_not_verified"
+        orbit_policy = "free_orbit_blocked_until_runtime_verified"
+        camera_lock_required = False
+        provenance_label = "registered 3DGS transform only; live runtime not verified"
     elif source_kind == "external_3dgs_renderer" and has_external_render:
         render_mode = "external_3dgs_png_sidecar"
         viewer_status = "partial_external_render_only"
@@ -372,7 +451,7 @@ def _background_viewer_metadata(
                 "simulator_native": live_3dgs_runtime,
             },
             "external_3dgs_png_sidecar": {
-                "status": "active_reference_view_only" if has_external_render else "missing",
+                "status": "active_reference_view_only" if has_external_render and source_kind != "browser_native_3dgs" else ("available_reference_view_only" if has_external_render else "missing"),
                 "simulator_native": False,
             },
             "bg_only_diagnostic_cloud": {
@@ -383,6 +462,88 @@ def _background_viewer_metadata(
             },
         },
     }
+
+
+def _browser_3dgs_background_config(
+    run: Path,
+    viewer_dir: Path,
+    background: dict[str, Any],
+    support: dict[str, Any],
+    registration: dict[str, Any] | None,
+    native_3dgs_asset: Path,
+    bg_only_cloud: Path,
+    full_scene_cloud: Path,
+    external_render_path: Path | None,
+    runtime_report: dict[str, Any],
+) -> dict[str, Any]:
+    del background
+    registration_path = _registration_path(run, {"registration_path": "background/registration.json"})
+    runtime_verified = _browser_runtime_verified(runtime_report)
+    status = "live_3dgs_runtime" if runtime_verified else "blocked_browser_3dgs_runtime_not_verified"
+    transform = registration.get("transforms", {}).get("T_bg_only_cloud_to_sim_world") if registration else None
+    viewer_meta = _background_viewer_metadata(
+        source_kind="browser_native_3dgs",
+        status=status,
+        simulator_native=False,
+        has_external_render=external_render_path is not None,
+        has_bg_only_cloud=bg_only_cloud.is_file(),
+        has_full_scene_cloud=full_scene_cloud.is_file(),
+        has_native_asset=native_3dgs_asset.is_file(),
+    )
+    return {
+        "source_kind": "browser_native_3dgs",
+        "mode_label": "browser_native_3dgs",
+        "source_backend": "browser_3dgs_runtime",
+        "status": status,
+        **viewer_meta,
+        "diagnostic_only": not runtime_verified,
+        "is_final_visual": runtime_verified,
+        "simulator_native": False,
+        "image_path": None,
+        "image_size": None,
+        "render_report_path": _rel(viewer_dir, run / "qa" / "background_3dgs_render_report.json")
+        if (run / "qa" / "background_3dgs_render_report.json").is_file()
+        else None,
+        "point_cloud_path": _rel(viewer_dir, bg_only_cloud) if bg_only_cloud.is_file() else None,
+        "point_cloud_diagnostic_only": True,
+        "native_asset_candidate_path": _rel(viewer_dir, native_3dgs_asset) if native_3dgs_asset.is_file() else None,
+        "debug_full_scene_cloud_path": _rel(viewer_dir, full_scene_cloud) if full_scene_cloud.is_file() else None,
+        "registration_path": _rel(viewer_dir, registration_path) if registration_path is not None and registration_path.is_file() else None,
+        "registration": registration,
+        "point_cloud_transform": {
+            "source_frame": "opencv_x_right_y_down_z_forward_meters",
+            "target_frame": "z_up_ground_plane_meters",
+            "support_height_m": float(support.get("original_height_world_m", 0.0)),
+            "matrix": transform,
+        },
+        "gaussian_splat": _gaussian_splat_viewer_status(run, {}, registration),
+        "browser_3dgs": {
+            "asset_path": _rel(viewer_dir, native_3dgs_asset) if native_3dgs_asset.is_file() else None,
+            "runtime_status": status,
+            "runtime_report_path": _rel(viewer_dir, run / "qa" / "background_3dgs_runtime_report.json")
+            if (run / "qa" / "background_3dgs_runtime_report.json").is_file()
+            else None,
+            "registration_transform": (registration or {}).get("T_3dgs_world_to_sim_world"),
+            "blocked_reason": None if runtime_verified else "browser-native 3DGS loader/runtime evidence is not available.",
+        },
+        "note": "Browser-native 3DGS backend was requested; external PNG sidecar is not promoted to live 3D.",
+    }
+
+
+def _background_3dgs_runtime_report(run: Path) -> dict[str, Any]:
+    path = run / "qa" / "background_3dgs_runtime_report.json"
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _browser_runtime_verified(report: dict[str, Any]) -> bool:
+    viewer = report.get("native_viewer_runtime") if isinstance(report.get("native_viewer_runtime"), dict) else {}
+    return bool(report.get("browser_native_3dgs_verified") or viewer.get("status") in {"verified", "passed", "live_3dgs_runtime"})
 
 
 def _registration_path(run: Path, background: dict[str, Any]) -> Path | None:
@@ -521,6 +682,10 @@ def _settled_pose_config(run: Path, viewer_dir: Path) -> tuple[dict[str, Any], d
         },
         records,
     )
+
+
+def _settled_pose_ready(pose_display: dict[str, Any]) -> bool:
+    return bool(pose_display.get("toggle_enabled")) and str(pose_display.get("status")) in {"completed", "passed", "ready"}
 
 
 def _object_config(run: Path, viewer_dir: Path, obj: dict[str, Any], settled_pose: dict[str, Any] | None = None) -> dict[str, Any]:

@@ -2,7 +2,7 @@ import json
 
 import trimesh
 
-from real2sim_scene_foundry.genesis_export import export_genesis_scene
+from real2sim_scene_foundry.genesis_export import apply_genesis_settle_writeback, export_genesis_scene
 from real2sim_scene_foundry.isaac_export import export_isaac_scene
 from real2sim_scene_foundry.export_qa import write_sim_export_report
 from real2sim_scene_foundry.sim_export_manifest import write_sim_export_manifest
@@ -288,6 +288,48 @@ def test_genesis_export_settle_delta_report_contract_exposes_initial_vs_settled_
     assert "viewer_export_action" in script
     assert "requires_viewer_export_delta_display" in script
     assert "visual_physics_coherence" in script
+
+
+def test_apply_genesis_settle_writeback_updates_settled_manifest_and_pose_json(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _write_ready_run(run_dir)
+    settled = [[1, 0, 0, 0.2], [0, 1, 0, 0.1], [0, 0, 1, 0.3], [0, 0, 0, 1]]
+    (run_dir / "objects" / "cup" / "pose.json").write_text(
+        json.dumps({"object_id": "cup", "T_object_to_world": IDENTITY, "T_object_to_camera": IDENTITY}),
+        encoding="utf-8",
+    )
+    (run_dir / "qa").mkdir(exist_ok=True)
+    (run_dir / "qa" / "genesis_settle_report.json").write_text(
+        json.dumps({"status": "completed", "stability_status": "passed"}),
+        encoding="utf-8",
+    )
+    (run_dir / "qa" / "settled_pose_delta_report.json").write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "objects": [
+                    {
+                        "object_id": "cup",
+                        "settled_T_object_to_world": settled,
+                        "translation_delta_m": [0.2, 0.1, 0.1],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = apply_genesis_settle_writeback(run_dir, writeback=True)
+
+    assert result["status"] == "completed"
+    assert result["pose_written_back"] is True
+    settled_manifest = json.loads((run_dir / "scene_manifest.settled.json").read_text(encoding="utf-8"))
+    live_manifest = json.loads((run_dir / "scene_manifest.json").read_text(encoding="utf-8"))
+    pose = json.loads((run_dir / "objects" / "cup" / "pose.json").read_text(encoding="utf-8"))
+    assert settled_manifest["objects"][0]["T_object_to_world"] == settled
+    assert live_manifest["objects"][0]["T_object_to_world"] == settled
+    assert pose["T_object_to_world"] == settled
 
 
 def test_genesis_export_prioritizes_polygon_slab_support_mesh_over_box_proxy(tmp_path):

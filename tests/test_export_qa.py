@@ -266,7 +266,7 @@ def test_export_qa_blocks_bg_only_cloud_when_3dgs_is_sidecar_not_runtime_verifie
     assert "blocked_background_proxy_visual:bg_only_cloud" in report["blocking_reasons"]
 
 
-def test_export_qa_passes_background_when_external_3dgs_render_is_verified(tmp_path):
+def test_export_qa_blocks_background_when_3dgs_is_external_sidecar_only(tmp_path):
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     _write_ready_run(run_dir)
@@ -343,12 +343,13 @@ def test_export_qa_passes_background_when_external_3dgs_render_is_verified(tmp_p
     result = write_sim_export_report(run_dir)
 
     report = json.loads(result.report_path.read_text(encoding="utf-8"))
-    assert report["sections"]["background_registration"]["status"] == "passed"
+    assert report["sections"]["background_registration"]["status"] == "blocked"
     assert report["sections"]["background_registration"]["visual_asset"]["source_kind"] == "external_3dgs_renderer"
     assert report["sections"]["background_registration"]["visual_asset"]["simulator_native"] is False
+    assert "background_external_render_only" in report["sections"]["background_registration"]["blocking_reasons"]
     assert "blocked_background_proxy_visual:bg_only_cloud" not in report["blocking_reasons"]
     assert "background_3dgs_runtime_not_verified" not in report["blocking_reasons"]
-    assert report["overall_status"] == "passed"
+    assert report["overall_status"] == "blocked"
 
 
 def test_export_qa_blocks_external_3dgs_render_with_placeholder_registration(tmp_path):
@@ -681,3 +682,92 @@ def test_export_qa_refreshes_stale_usd_report_after_table_collision_qa_passes(tm
     refreshed_usd_report = json.loads((run_dir / "qa" / "usd_export_report.json").read_text(encoding="utf-8"))
     assert report["sections"]["table_collision_projection"]["status"] == "passed"
     assert refreshed_usd_report["support_surface_status"] == "ready"
+
+
+def test_strict_claims_write_honest_milestone_and_keep_external_3dgs_partial(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _write_ready_run(run_dir)
+    _write_passing_backend_reports(run_dir)
+    (run_dir / "background" / "registration.json").write_text(
+        json.dumps(
+            {
+                "status": "registered",
+                "T_3dgs_world_to_sim_world": [[1, 0, 0, 0.1], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
+                "transform_sources": {"T_3dgs_world_to_sim_world": "manual_splat_alignment"},
+                "scale_source": "manual_splat_alignment",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "qa" / "isaac_load_report.json").write_text(
+        json.dumps(
+            {
+                "status": "loaded",
+                "report_source": "preserved_existing_worker_report",
+                "validation_reused": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "qa" / "collision_rebuild_report.json").write_text(
+        json.dumps({"status": "blocked", "paper_equivalence_status": "blocked"}),
+        encoding="utf-8",
+    )
+    (run_dir / "qa" / "physics_property_report.json").write_text(
+        json.dumps({"status": "partial", "paper_equivalence_status": "partial"}),
+        encoding="utf-8",
+    )
+
+    result = write_sim_export_report(run_dir, strict_claims=True)
+
+    report = json.loads(result.report_path.read_text(encoding="utf-8"))
+    milestone = json.loads((run_dir / "qa" / "honest_milestone.json").read_text(encoding="utf-8"))
+    isaac_fresh = json.loads((run_dir / "qa" / "isaac_fresh_validation_report.json").read_text(encoding="utf-8"))
+    assert report["strict_claims"] is True
+    assert report["claim_gate"]["engineering_interactive_scene_status"] == "blocked"
+    assert report["claim_gate"]["simfoundry_upper_reproduction_status"] == "partial"
+    assert report["sections"]["background_registration"]["status"] == "blocked"
+    assert "background_external_render_only" in report["sections"]["background_registration"]["blocking_reasons"]
+    assert report["sections"]["isaac_export"]["status"] == "partial"
+    assert report["sections"]["isaac_export"]["repeatability_status"] == "partial_preserved_report"
+    assert isaac_fresh["status"] == "partial_preserved_report"
+    assert isaac_fresh["fresh_direct_validation"] is False
+    assert "isaac_validation_reused" in isaac_fresh["blocking_reasons"]
+    assert "isaac_validation_reused" in milestone["blocking_reasons"]
+    assert "external_3dgs_render_sidecar" in milestone["remaining_gaps"]
+    assert "coacd_collision_decomposition" in milestone["remaining_gaps"]
+    assert "physics_property_inference" in milestone["remaining_gaps"]
+    assert milestone["simfoundry_full_pipeline_status"] == "out_of_scope"
+
+
+def test_strict_claims_blocks_weak_table_collision_v2(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _write_ready_run(run_dir)
+    _write_passing_backend_reports(run_dir)
+    (run_dir / "qa" / "table_collision_report_v2.json").write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "status": "blocked",
+                "weak_status": "diagnostic_pass",
+                "source_backend": "tabletop_mask",
+                "geometry_type": "polygon_slab",
+                "derived_from_tabletop_mask": True,
+                "visual_qa_path": "qa/table_collision_overlay.png",
+                "projection_iou": 0.531,
+                "projection_iou_with_tabletop_mask": 0.531,
+                "blocking_reasons": ["below_export_grade_tabletop_iou"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = write_sim_export_report(run_dir, strict_claims=True)
+
+    report = json.loads(result.report_path.read_text(encoding="utf-8"))
+    assert report["sections"]["table_collision_projection"]["status"] == "blocked"
+    assert "below_export_grade_tabletop_iou" in report["blocking_reasons"]
+    milestone = json.loads((run_dir / "qa" / "honest_milestone.json").read_text(encoding="utf-8"))
+    assert "table_collision_export_grade_blocked" in milestone["blocking_reasons"]

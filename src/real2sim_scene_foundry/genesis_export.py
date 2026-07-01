@@ -61,6 +61,116 @@ def export_genesis_scene(run_dir: str | Path, *, settle_steps: int = 100) -> Gen
     return GenesisExportResult(script_path=script_path, report_path=report_path, report=report)
 
 
+def apply_genesis_settle_writeback(run_dir: str | Path, *, writeback: bool = False) -> dict[str, Any]:
+    run = Path(run_dir)
+    qa_dir = run / "qa"
+    qa_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = run / "scene_manifest.json"
+    settle_report = _load_json(qa_dir / "genesis_settle_report.json")
+    delta_report = _load_json(qa_dir / "settled_pose_delta_report.json")
+    reasons: list[str] = []
+    if settle_report.get("status") != "completed":
+        reasons.append("genesis_settle_not_completed")
+    if settle_report.get("stability_status") not in {None, "passed"}:
+        reasons.append("genesis_settle_failed")
+    if not delta_report:
+        reasons.append("settled_pose_delta_report_missing")
+    manifest = _load_json(manifest_path)
+    if not manifest:
+        reasons.append("scene_manifest_missing")
+
+    object_transforms = _settled_object_transforms(delta_report)
+    if not object_transforms:
+        reasons.append("settled_object_transforms_missing")
+
+    status = "completed" if not reasons else "blocked"
+    pose_written_back = False
+    if manifest and object_transforms:
+        settled_manifest = json.loads(json.dumps(manifest))
+        for obj in settled_manifest.get("objects", []):
+            object_id = str(obj.get("object_id"))
+            transform = object_transforms.get(object_id)
+            if transform is not None:
+                obj.setdefault("initial_T_object_to_world", obj.get("T_object_to_world"))
+                obj["T_object_to_world"] = transform
+                obj["settled_pose_source"] = "genesis_settle"
+        (run / "scene_manifest.settled.json").write_text(json.dumps(settled_manifest, indent=2), encoding="utf-8")
+        if writeback and status == "completed":
+            manifest_path.write_text(json.dumps(settled_manifest, indent=2), encoding="utf-8")
+            for obj in settled_manifest.get("objects", []):
+                object_id = str(obj.get("object_id"))
+                transform = object_transforms.get(object_id)
+                if transform is None:
+                    continue
+                pose_path = run / "objects" / object_id / "pose.json"
+                pose = _load_json(pose_path)
+                pose["object_id"] = object_id
+                pose.setdefault("initial_T_object_to_world", obj.get("initial_T_object_to_world"))
+                pose["T_object_to_world"] = transform
+                pose["settled_pose_source"] = "genesis_settle"
+                pose_path.parent.mkdir(parents=True, exist_ok=True)
+                pose_path.write_text(json.dumps(pose, indent=2), encoding="utf-8")
+            pose_written_back = True
+
+    report = {
+        "version": 1,
+        "status": status,
+        "blocking_reasons": _dedupe(reasons),
+        "writeback_requested": bool(writeback),
+        "pose_written_back": bool(pose_written_back),
+        "settled_manifest_path": "scene_manifest.settled.json" if (run / "scene_manifest.settled.json").is_file() else None,
+        "settle_report_path": "qa/genesis_settle_report.json" if (qa_dir / "genesis_settle_report.json").is_file() else None,
+        "settled_pose_delta_report_path": "qa/settled_pose_delta_report.json" if (qa_dir / "settled_pose_delta_report.json").is_file() else None,
+        "object_count": len(object_transforms),
+        "report_path": "qa/genesis_settle_writeback_report.json",
+    }
+    (qa_dir / "genesis_settle_writeback_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    return report
+
+
+def _settled_object_transforms(delta_report: dict[str, Any]) -> dict[str, list[list[float]]]:
+    raw = delta_report.get("objects", [])
+    if isinstance(raw, dict):
+        iterable = [dict(value, object_id=key) if isinstance(value, dict) else {"object_id": key} for key, value in raw.items()]
+    elif isinstance(raw, list):
+        iterable = [item for item in raw if isinstance(item, dict)]
+    else:
+        iterable = []
+    transforms: dict[str, list[list[float]]] = {}
+    for item in iterable:
+        object_id = str(item.get("object_id") or "")
+        transform = item.get("settled_T_object_to_world") or item.get("T_object_to_world_settled") or item.get("T_settled_object_to_world")
+        if object_id and _is_transform(transform):
+            transforms[object_id] = transform
+    return transforms
+
+
+def _is_transform(value: Any) -> bool:
+    if not isinstance(value, list) or len(value) != 4:
+        return False
+    return all(isinstance(row, list) and len(row) == 4 for row in value)
+
+
+def _load_json(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _dedupe(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in items:
+        if item not in seen:
+            out.append(item)
+            seen.add(item)
+    return out
+
+
 def _genesis_visual_physics_coherence() -> dict[str, Any]:
     return {
         "status": "partial",

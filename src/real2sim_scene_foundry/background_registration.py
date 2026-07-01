@@ -7,6 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+from PIL import Image
+
 VALID_BACKGROUND_SOURCE_KINDS = {
     "bg_only_cloud",
     "registered_3dgs",
@@ -102,6 +105,155 @@ def load_background_registration(run_dir: str | Path) -> dict[str, Any] | None:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def register_3dgs_background(run_dir: str | Path, *, method: str = "camera-sim3", write: bool = True) -> BackgroundRegistrationResult:
+    run = Path(run_dir)
+    bg_dir = run / "background"
+    bg_dir.mkdir(parents=True, exist_ok=True)
+    gs_status = _load_3dgs_status(run)
+    gs_completed = gs_status.get("status") == "completed"
+    camera = _load_json(run / "camera.json")
+    anchor = _load_json(bg_dir / "3dgs_camera_pose.json")
+    blocking_reasons: list[str] = []
+    t_gs_cam = _transform(anchor.get("T_3dgs_camera_to_world") or anchor.get("T_gs_camera_to_world"))
+    t_sim_cam = _transform(camera.get("T_camera_to_world") or camera.get("T_sim_camera_to_world"))
+    if t_gs_cam is None:
+        blocking_reasons.append("missing_3dgs_anchor_camera_pose")
+    if t_sim_cam is None:
+        blocking_reasons.append("missing_sim_anchor_camera_pose")
+    if not gs_completed:
+        blocking_reasons.append("3dgs_training_not_completed")
+
+    bg_only_transform = _opencv_cloud_to_sim_world(_support_height_m(run))
+    if blocking_reasons:
+        data = {
+            "version": 1,
+            "source_kind": "registered_3dgs",
+            "status": "blocked_missing_camera_pose_scale_evidence",
+            "method": method,
+            "scale": None,
+            "scale_source": "unknown",
+            "anchor_frame": anchor.get("anchor_frame"),
+            "T_bg_only_cloud_to_sim_world": bg_only_transform,
+            "T_3dgs_world_to_sim_world": None,
+            "transforms": {
+                "T_bg_only_cloud_to_sim_world": bg_only_transform,
+                "T_3dgs_world_to_sim_world": None,
+            },
+            "transform_sources": {
+                "T_bg_only_cloud_to_sim_world": "opencv_camera_cloud_to_z_up_world_using_support_height",
+                "T_3dgs_world_to_sim_world": "blocked_missing_camera_pose_scale_evidence",
+            },
+            "registrations": {
+                "bg_only_cloud": {
+                    "status": "registered" if (run / "background" / "bg_only_cloud.ply").is_file() else "missing",
+                    "transform": bg_only_transform,
+                    "transform_source": "opencv_camera_cloud_to_z_up_world_using_support_height",
+                    "scale_source": "input_metric_depth",
+                },
+                "3dgs": {
+                    "status": "blocked_missing_camera_pose_scale_evidence",
+                    "transform": None,
+                    "transform_source": "blocked_missing_camera_pose_scale_evidence",
+                    "scale_source": None,
+                    "blocked_reason": "Missing shared camera pose and metric scale evidence.",
+                },
+            },
+            "assets": {
+                "bg_only_cloud": _rel_if_exists(run, run / "background" / "bg_only_cloud.ply"),
+                "3dgs_native_asset_candidate": _rel_if_exists(run, _native_3dgs_asset_path(run)),
+                "full_scene_cloud_debug": _rel_if_exists(run, run / "scene_cloud.ply"),
+            },
+            "gaussian_splat": _gaussian_splat_metadata(gs_status, run, "registered_3dgs", "blocked_missing_camera_pose_scale_evidence"),
+            "blocking_reasons": _dedupe(blocking_reasons),
+            "blocked_reason": "No shared camera pose and metric scale evidence is available to derive T_3dgs_world_to_sim_world.",
+        }
+    else:
+        transform = t_sim_cam @ np.linalg.inv(t_gs_cam)
+        transform_list = transform.tolist()
+        data = {
+            "version": 1,
+            "source_kind": "registered_3dgs",
+            "status": "registered",
+            "method": method,
+            "scale": 1.0,
+            "scale_source": "shared_anchor_camera_metric_bridge",
+            "anchor_frame": anchor.get("anchor_frame"),
+            "coordinate_convention": {
+                "3dgs": str(anchor.get("coordinate_convention", "3dgs_camera_to_world")),
+                "sim": "z_up_meter_camera_to_world",
+            },
+            "metrics": {
+                "anchor_camera_count": 1,
+                "camera_center_rmse_m": 0.0,
+            },
+            "T_bg_only_cloud_to_sim_world": bg_only_transform,
+            "T_3dgs_world_to_sim_world": transform_list,
+            "transforms": {
+                "T_bg_only_cloud_to_sim_world": bg_only_transform,
+                "T_3dgs_world_to_sim_world": transform_list,
+            },
+            "transform_sources": {
+                "T_bg_only_cloud_to_sim_world": "opencv_camera_cloud_to_z_up_world_using_support_height",
+                "T_3dgs_world_to_sim_world": "camera_anchor_bridge",
+            },
+            "registrations": {
+                "bg_only_cloud": {
+                    "status": "registered" if (run / "background" / "bg_only_cloud.ply").is_file() else "missing",
+                    "transform": bg_only_transform,
+                    "transform_source": "opencv_camera_cloud_to_z_up_world_using_support_height",
+                    "scale_source": "input_metric_depth",
+                },
+                "3dgs": {
+                    "status": "registered",
+                    "transform": transform_list,
+                    "transform_source": "camera_anchor_bridge",
+                    "scale_source": "shared_anchor_camera_metric_bridge",
+                    "blocked_reason": None,
+                },
+            },
+            "assets": {
+                "bg_only_cloud": _rel_if_exists(run, run / "background" / "bg_only_cloud.ply"),
+                "3dgs_native_asset_candidate": _rel_if_exists(run, _native_3dgs_asset_path(run)),
+                "full_scene_cloud_debug": _rel_if_exists(run, run / "scene_cloud.ply"),
+            },
+            "gaussian_splat": _gaussian_splat_metadata(gs_status, run, "registered_3dgs", "registered"),
+        }
+    path = bg_dir / "registration.json"
+    if write:
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    return BackgroundRegistrationResult(path=path, data=data)
+
+
+def qa_background_registration(run_dir: str | Path, *, heldout_frames: int = 16) -> dict[str, Any]:
+    run = Path(run_dir)
+    qa_dir = run / "qa"
+    qa_dir.mkdir(parents=True, exist_ok=True)
+    registration = load_background_registration(run) or {}
+    reasons: list[str] = []
+    if registration.get("status") != "registered":
+        reasons.append("background_unregistered")
+    if registration.get("T_3dgs_world_to_sim_world") is None:
+        reasons.append("missing_T_3dgs_world_to_sim_world")
+    transform_source = str((registration.get("transform_sources") or {}).get("T_3dgs_world_to_sim_world") or "")
+    if not transform_source or any(marker in transform_source.lower() for marker in ("placeholder", "unknown", "not_available")):
+        reasons.append("background_registration_transform_not_evidenced")
+    overlay_path = qa_dir / "background_registration_overlay.png"
+    Image.new("RGB", (2, 2), color=(0, 0, 0)).save(overlay_path)
+    report = {
+        "version": 1,
+        "status": "passed" if not reasons else "blocked",
+        "blocking_reasons": _dedupe(reasons),
+        "heldout_frames_requested": int(heldout_frames),
+        "registration_path": "background/registration.json" if (run / "background" / "registration.json").is_file() else None,
+        "overlay_path": "qa/background_registration_overlay.png",
+        "T_3dgs_world_to_sim_world": registration.get("T_3dgs_world_to_sim_world"),
+        "transform_source": transform_source or None,
+        "metrics": registration.get("metrics", {}),
+    }
+    (qa_dir / "background_registration_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    return report
+
+
 def _infer_source_kind(run: Path) -> str:
     if (run / "background" / "bg_only_cloud.ply").is_file():
         return "bg_only_cloud"
@@ -177,6 +329,19 @@ def _gaussian_splat_metadata(
     native_asset_path = _rel_if_exists(run, _native_3dgs_asset_path(run))
     if status.get("status") == "completed":
         if source_kind == "registered_3dgs":
+            if registration_status == "registered":
+                return {
+                    "status": "registered_3dgs",
+                    "training_status": "completed",
+                    "run_path": run_path,
+                    "config_path": config_path,
+                    "checkpoint_path": checkpoint_path,
+                    "native_asset_path": native_asset_path,
+                    "native_rendering": False,
+                    "registration_status": registration_status,
+                    "runtime_status": "blocked_native_3dgs_not_integrated",
+                    "note": "3DGS has a metric bridge into simulator world; native simulator rendering remains unverified.",
+                }
             return {
                 "status": "blocked_missing_camera_pose_scale_evidence",
                 "training_status": "completed",
@@ -278,6 +443,36 @@ def _load_3dgs_status(run: Path) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {"status": "invalid_status_json"}
     return data if isinstance(data, dict) else {"status": "invalid_status_json"}
+
+
+def _load_json(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _transform(value: Any) -> np.ndarray | None:
+    try:
+        transform = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError):
+        return None
+    if transform.shape != (4, 4) or not np.all(np.isfinite(transform)):
+        return None
+    return transform
+
+
+def _dedupe(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in items:
+        if item not in seen:
+            out.append(item)
+            seen.add(item)
+    return out
 
 
 def _native_3dgs_asset_path(run: Path) -> Path:

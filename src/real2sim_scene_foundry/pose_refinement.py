@@ -219,6 +219,180 @@ def measure_object_support_alignment(
     }
 
 
+def refine_pose_rgbd(run_dir: str | Path, *, frames: str = "reference") -> PoseSupportRefinementResult:
+    """Write fail-closed RGB-D/mask/mesh pose alignment reports."""
+    run = Path(run_dir)
+    manifest_path = run / "scene_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    support = manifest.get("support_plane", {})
+    object_reports = []
+    for item in manifest.get("objects", []):
+        object_reports.append(_write_rgbd_pose_report(run, item, support, frames=frames))
+    aggregate = _object_alignment_aggregate(object_reports)
+    report = {
+        "version": 1,
+        "status": aggregate["status"],
+        "source": "rgbd_refined_from_auto",
+        "operation": "rgbd_mask_mesh_pose_verification",
+        "frames": frames,
+        "thresholds": _object_alignment_thresholds(),
+        "objects": object_reports,
+        "blocking_reasons": aggregate["blocking_reasons"],
+    }
+    qa_dir = run / "qa"
+    qa_dir.mkdir(parents=True, exist_ok=True)
+    report_path = qa_dir / "object_pose_alignment_report.json"
+    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    return PoseSupportRefinementResult(report_path=report_path, report=report)
+
+
+def qa_object_alignment(run_dir: str | Path) -> dict[str, Any]:
+    run = Path(run_dir)
+    manifest = _load_json(run / "scene_manifest.json")
+    object_reports = []
+    for item in manifest.get("objects", []):
+        object_id = str(item.get("object_id"))
+        report = _load_json(run / "objects" / object_id / "pose_refinement_report.json")
+        status, reasons = _evaluate_object_alignment_report(report)
+        object_reports.append(
+            {
+                "object_id": object_id,
+                "status": status,
+                "blocking_reasons": reasons,
+                "metrics": report.get("metrics", {}),
+                "report_path": f"objects/{object_id}/pose_refinement_report.json" if report else None,
+            }
+        )
+    aggregate = _object_alignment_aggregate(object_reports)
+    report = {
+        "version": 1,
+        "status": aggregate["status"],
+        "thresholds": _object_alignment_thresholds(),
+        "objects": object_reports,
+        "blocking_reasons": aggregate["blocking_reasons"],
+    }
+    qa_dir = run / "qa"
+    qa_dir.mkdir(parents=True, exist_ok=True)
+    (qa_dir / "object_pose_alignment_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    return {**report, "report_path": "qa/object_pose_alignment_report.json"}
+
+
+def _write_rgbd_pose_report(run: Path, item: dict[str, Any], support: dict[str, Any], *, frames: str) -> dict[str, Any]:
+    object_id = str(item["object_id"])
+    object_dir = run / "objects" / object_id
+    object_dir.mkdir(parents=True, exist_ok=True)
+    support_alignment = measure_object_support_alignment(run, item, support)
+    clearance = support_alignment.get("clearance_m")
+    support_gap_abs = abs(float(clearance)) if clearance is not None else None
+    penetration_depth = max(0.0, -float(clearance)) if clearance is not None else None
+    metrics = {
+        "mask_iou_ref": None,
+        "bbox_error_px": None,
+        "depth_median_abs_m": None,
+        "depth_p90_abs_m": None,
+        "support_gap_abs_m": support_gap_abs,
+        "penetration_depth_m": penetration_depth,
+        "projected_center_error_px": None,
+    }
+    camera_source = _rgbd_camera_source(run)
+    scale_source = str(item.get("scale_source") or item.get("pose_refinement", {}).get("scale_source") or "rgbd_alignment_unverified")
+    report = {
+        "version": 1,
+        "object_id": object_id,
+        "label": item.get("label", object_id),
+        "status": "blocked",
+        "source": "rgbd_refined_from_auto",
+        "operation": "rgbd_mask_mesh_pose_verification",
+        "frames": frames,
+        "optimized_dofs": "yaw_xy_z_uniform_scale",
+        "camera_source": camera_source,
+        "scale_source": scale_source,
+        "metrics": metrics,
+        "support_alignment": support_alignment,
+        "blocking_reasons": _rgbd_missing_metric_reasons(metrics, camera_source, scale_source),
+        "T_object_to_camera": item.get("T_object_to_camera"),
+        "T_object_to_world": item.get("T_object_to_world"),
+    }
+    status, reasons = _evaluate_object_alignment_report(report)
+    report["status"] = "accepted" if status == "passed" else "blocked"
+    report["blocking_reasons"] = reasons
+    Image.new("RGB", (2, 2), color=(0, 0, 0)).save(object_dir / "pose_overlay_ref_frame.png")
+    Image.new("RGB", (2, 2), color=(0, 0, 0)).save(object_dir / "depth_residual_ref_frame.png")
+    _write_object_report(object_dir, report)
+    return report
+
+
+def _rgbd_camera_source(run: Path) -> str:
+    camera = _load_json(run / "camera.json")
+    has_intrinsics = any(key in camera for key in ("K", "intrinsics")) or all(key in camera for key in ("fx", "fy", "cx", "cy"))
+    has_extrinsics = "T_world_to_camera" in camera or "T_camera_to_world" in camera
+    return "explicit" if has_intrinsics and has_extrinsics else "fallback"
+
+
+def _object_alignment_thresholds() -> dict[str, float]:
+    return {
+        "mask_iou_ref": 0.65,
+        "depth_median_abs_m": 0.03,
+        "depth_p90_abs_m": 0.08,
+        "support_gap_abs_m": 0.005,
+        "penetration_depth_m": 0.005,
+        "projected_center_error_px": 20.0,
+    }
+
+
+def _evaluate_object_alignment_report(report: dict[str, Any]) -> tuple[str, list[str]]:
+    if not report:
+        return "blocked", ["pose_refinement_report_missing"]
+    metrics = report.get("metrics", {}) if isinstance(report.get("metrics"), dict) else {}
+    reasons = list(report.get("blocking_reasons", []))
+    thresholds = _object_alignment_thresholds()
+    checks = [
+        ("mask_iou_ref", "mask_iou_below_threshold", lambda value, threshold: value >= threshold),
+        ("depth_median_abs_m", "depth_median_residual_too_high", lambda value, threshold: value <= threshold),
+        ("depth_p90_abs_m", "depth_p90_residual_too_high", lambda value, threshold: value <= threshold),
+        ("support_gap_abs_m", "support_gap_too_large", lambda value, threshold: value <= threshold),
+        ("penetration_depth_m", "penetration_depth_too_large", lambda value, threshold: value <= threshold),
+        ("projected_center_error_px", "projected_center_error_too_high", lambda value, threshold: value <= threshold),
+    ]
+    for key, reason, predicate in checks:
+        value = _metric_float(metrics.get(key))
+        if value is None:
+            reasons.append(f"{key}_unavailable")
+        elif not predicate(value, thresholds[key]):
+            reasons.append(reason)
+    if report.get("camera_source") != "explicit":
+        reasons.append("camera_source_fallback")
+    if str(report.get("scale_source") or "").lower() in {"bbox_only", "reference_camera_bbox_refinement"}:
+        reasons.append("scale_source_bbox_only")
+    reasons = _dedupe(reasons)
+    return ("passed" if not reasons else "blocked"), reasons
+
+
+def _rgbd_missing_metric_reasons(metrics: dict[str, Any], camera_source: str, scale_source: str) -> list[str]:
+    report = {"metrics": metrics, "camera_source": camera_source, "scale_source": scale_source, "blocking_reasons": []}
+    return _evaluate_object_alignment_report(report)[1]
+
+
+def _object_alignment_aggregate(object_reports: list[dict[str, Any]]) -> dict[str, Any]:
+    reasons: list[str] = []
+    for report in object_reports:
+        object_id = str(report.get("object_id", "unknown"))
+        status = report.get("status")
+        if status not in {"accepted", "passed"}:
+            reasons.append(f"object_alignment_blocked:{object_id}")
+        reasons.extend(f"{object_id}:{reason}" for reason in report.get("blocking_reasons", []))
+    reasons = _dedupe(reasons)
+    return {"status": "passed" if not reasons else "blocked", "blocking_reasons": reasons}
+
+
+def _metric_float(value: Any) -> float | None:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if np.isfinite(result) else None
+
+
 def _snap_one_object(run: Path, item: dict[str, Any], *, support_z: float, tolerance_m: float) -> dict[str, Any]:
     object_id = str(item["object_id"])
     object_dir = run / "objects" / object_id
@@ -851,3 +1025,13 @@ def _load_json(path: Path) -> dict[str, Any]:
     if not path.is_file():
         return {}
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _dedupe(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in items:
+        if item not in seen:
+            out.append(item)
+            seen.add(item)
+    return out

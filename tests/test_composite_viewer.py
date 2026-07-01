@@ -3,7 +3,7 @@ import json
 import trimesh
 
 from real2sim_scene_foundry.cli import main
-from real2sim_scene_foundry.composite_viewer import export_composite_viewer
+from real2sim_scene_foundry.composite_viewer import export_composite_viewer, serve_composite_viewer
 
 
 def _ply_text(rgb_line):
@@ -221,7 +221,7 @@ def test_export_composite_viewer_blocks_final_visual_when_external_3dgs_render_i
     assert "setScalar(item.asset_scale || 1)" in html
 
 
-def test_export_composite_viewer_uses_external_3dgs_render_as_final_background(tmp_path):
+def test_export_composite_viewer_uses_external_3dgs_render_as_reference_only_background(tmp_path):
     run = tmp_path / "run"
     run.mkdir()
     _write_run(run)
@@ -260,7 +260,7 @@ def test_export_composite_viewer_uses_external_3dgs_render_as_final_background(t
     assert config["background"]["background_layers"]["full_scene_debug_cloud"]["status"] == "available_debug_only"
     assert config["background"]["image_path"] == "../../qa/background_3dgs_render.png"
     assert config["background"]["image_size"] == [1280, 720]
-    assert config["background"]["is_final_visual"] is True
+    assert config["background"]["is_final_visual"] is False
     assert config["background"]["simulator_native"] is False
     assert config["background"]["point_cloud_path"] == "../../background/bg_only_cloud.ply"
     assert config["background"]["point_cloud_diagnostic_only"] is True
@@ -310,6 +310,47 @@ def test_export_composite_viewer_uses_external_3dgs_render_as_final_background(t
     assert "applyPoseMode" in html
 
 
+def test_export_composite_viewer_does_not_pass_registered_3dgs_without_live_runtime(tmp_path):
+    run = tmp_path / "run"
+    run.mkdir()
+    _write_run(run)
+    (run / "qa" / "background_3dgs_render.png").write_text("png", encoding="utf-8")
+    (run / "qa" / "background_3dgs_render_report.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "status": "rendered",
+                "backend": "external_3dgs_renderer",
+                "source_kind": "external_3dgs_renderer",
+                "registered_3dgs_rendered": True,
+                "simulator_native": False,
+                "render_path": "qa/background_3dgs_render.png",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run / "background" / "registration.json").write_text(
+        json.dumps(
+            {
+                "status": "registered",
+                "source_kind": "registered_3dgs",
+                "T_3dgs_world_to_sim_world": _identity4(),
+                "transform_sources": {"T_3dgs_world_to_sim_world": "camera_anchor_bridge"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = export_composite_viewer(run)
+
+    config = json.loads(result.config_path.read_text(encoding="utf-8"))
+    assert config["status"] == "blocked"
+    assert config["status_reason"] == "blocked_registered_3dgs_runtime_not_verified"
+    assert config["background"]["source_kind"] == "registered_3dgs"
+    assert config["background"]["live_3dgs_runtime"] is False
+    assert config["background"]["is_final_visual"] is False
+
+
 def test_export_composite_viewer_consumes_settled_pose_delta_report(tmp_path):
     run = tmp_path / "run"
     run.mkdir()
@@ -343,6 +384,38 @@ def test_export_composite_viewer_consumes_settled_pose_delta_report(tmp_path):
     assert config["objects"][0]["settled_world_position"] == [0.1, 1.0, 0.25]
     assert config["objects"][0]["settled_pose_available"] is True
     assert config["objects"][0]["settled_pose_delta"]["translation_delta_m"] == [0.0, 0.0, 0.05]
+
+
+def test_export_composite_viewer_show_settled_sets_default_pose_mode(tmp_path):
+    run = tmp_path / "run"
+    run.mkdir()
+    _write_run(run, include_3dgs=False)
+    (run / "qa" / "settled_pose_delta_report.json").write_text(
+        json.dumps({"status": "completed", "objects": [{"object_id": "cup", "final_pos": [0.1, 1.0, 0.25]}]}),
+        encoding="utf-8",
+    )
+
+    result = export_composite_viewer(run, show_settled=True)
+
+    config = json.loads(result.config_path.read_text(encoding="utf-8"))
+    assert config["pose_display"]["toggle_enabled"] is True
+    assert config["pose_display"]["default_mode"] == "settled"
+
+
+def test_export_composite_viewer_show_settled_keeps_initial_default_for_partial_report(tmp_path):
+    run = tmp_path / "run"
+    run.mkdir()
+    _write_run(run, include_3dgs=False)
+    (run / "qa" / "settled_pose_delta_report.json").write_text(
+        json.dumps({"status": "partial", "objects": [{"object_id": "cup", "final_pos": [0.1, 1.0, 0.25]}]}),
+        encoding="utf-8",
+    )
+
+    result = export_composite_viewer(run, show_settled=True)
+
+    config = json.loads(result.config_path.read_text(encoding="utf-8"))
+    assert config["pose_display"]["toggle_enabled"] is True
+    assert config["pose_display"]["default_mode"] == "initial"
 
 
 def test_export_composite_viewer_consumes_settled_pose_delta_final_pos_without_matrix(tmp_path):
@@ -537,6 +610,43 @@ def test_export_composite_viewer_marks_native_3dgs_candidate_as_not_passed(tmp_p
     assert config["background"]["gaussian_splat"]["native_rendering"] is False
 
 
+def test_export_composite_viewer_browser_3dgs_backend_does_not_promote_png_sidecar(tmp_path):
+    run = tmp_path / "run"
+    run.mkdir()
+    _write_run(run)
+    native_dir = run / "background" / "3dgs_native"
+    native_dir.mkdir(parents=True)
+    (native_dir / "splat_rgb.ply").write_text(_ply_text("0 0 1 50 60 70"), encoding="utf-8")
+    (run / "qa" / "background_3dgs_render.png").write_text("png", encoding="utf-8")
+    (run / "qa" / "background_3dgs_render_report.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "status": "rendered",
+                "backend": "external_3dgs_renderer",
+                "source_kind": "external_3dgs_renderer",
+                "registered_3dgs_rendered": True,
+                "simulator_native": False,
+                "render_path": "qa/background_3dgs_render.png",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = export_composite_viewer(run, backend="browser-3dgs")
+
+    config = json.loads(result.config_path.read_text(encoding="utf-8"))
+    assert config["status"] == "blocked"
+    assert config["background"]["source_kind"] == "browser_native_3dgs"
+    assert config["background"]["status"] == "blocked_browser_3dgs_runtime_not_verified"
+    assert config["background"]["render_mode"] == "browser_native_3dgs"
+    assert config["background"]["live_3dgs_runtime"] is False
+    assert config["background"]["image_path"] is None
+    assert config["background"]["browser_3dgs"]["asset_path"] == "../../background/3dgs_native/splat_rgb.ply"
+    assert config["background"]["browser_3dgs"]["runtime_status"] == "blocked_browser_3dgs_runtime_not_verified"
+    assert config["background"]["background_layers"]["external_3dgs_png_sidecar"]["status"] == "available_reference_view_only"
+
+
 def test_cli_composite_viewer_export_only(tmp_path):
     run = tmp_path / "run"
     run.mkdir()
@@ -547,3 +657,73 @@ def test_cli_composite_viewer_export_only(tmp_path):
     assert code == 0
     assert (run / "exports" / "composite_viewer" / "index.html").is_file()
     assert (run / "exports" / "composite_viewer" / "viewer_config.json").is_file()
+
+
+def test_serve_composite_viewer_preserves_backend_and_show_settled(tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    run.mkdir()
+    seen = []
+
+    def fake_export(run_dir, *, backend, show_settled):  # noqa: ANN001
+        seen.append((run_dir, backend, show_settled))
+
+    class FakeServer:
+        def __init__(self, server_address, handler):  # noqa: ANN001
+            seen.append(("server", server_address, handler))
+
+        def serve_forever(self):
+            seen.append(("serve_forever",))
+
+    monkeypatch.setattr("real2sim_scene_foundry.composite_viewer.export_composite_viewer", fake_export)
+    monkeypatch.setattr("real2sim_scene_foundry.composite_viewer.ThreadingHTTPServer", FakeServer)
+
+    serve_composite_viewer(run, backend="browser-3dgs", show_settled=True)
+
+    assert seen[0] == (run, "browser-3dgs", True)
+    assert seen[-1] == ("serve_forever",)
+
+
+def test_cli_composite_viewer_accepts_browser_3dgs_and_show_settled(tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    run.mkdir()
+    seen = []
+
+    class Result:
+        index_path = run / "exports" / "composite_viewer" / "index.html"
+        config_path = run / "exports" / "composite_viewer" / "viewer_config.json"
+        url_path = "/exports/composite_viewer/index.html"
+
+    def fake_export(run_dir, *, backend, show_settled):  # noqa: ANN001
+        seen.append((run_dir, backend, show_settled))
+        Result.index_path.parent.mkdir(parents=True, exist_ok=True)
+        Result.index_path.write_text("", encoding="utf-8")
+        Result.config_path.write_text("{}", encoding="utf-8")
+        return Result()
+
+    from real2sim_scene_foundry import cli
+
+    monkeypatch.setattr(cli, "export_composite_viewer", fake_export)
+
+    code = main(["composite-viewer", "--run-dir", str(run), "--backend", "browser-3dgs", "--show-settled", "--export-only"])
+
+    assert code == 0
+    assert seen == [(run, "browser-3dgs", True)]
+
+
+def test_cli_qa_viewer_writes_audit(tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    run.mkdir()
+    seen = []
+
+    def fake_qa(run_dir):  # noqa: ANN001
+        seen.append(run_dir)
+        return {"status": "partial", "report_path": "qa/viewer_audit.json"}
+
+    from real2sim_scene_foundry import cli
+
+    monkeypatch.setattr(cli, "qa_viewer", fake_qa)
+
+    code = main(["qa-viewer", "--run-dir", str(run)])
+
+    assert code == 0
+    assert seen == [run]

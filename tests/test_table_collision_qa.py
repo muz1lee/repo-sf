@@ -3,7 +3,7 @@ import json
 import numpy as np
 from PIL import Image
 
-from real2sim_scene_foundry.table_collision_qa import write_table_collision_projection_qa
+from real2sim_scene_foundry.table_collision_qa import write_table_collision_projection_qa, write_table_collision_projection_qa_v2
 
 
 def _write_mask(path, *, fill=True):
@@ -95,6 +95,71 @@ def test_table_collision_projection_qa_blocks_low_default_projection_iou(tmp_pat
     assert "low_tabletop_projection_iou" in report["blocking_reasons"]
     assert 0.3 < report["projection_iou"] < 0.4
     assert report["iou_threshold"] == 0.5
+
+
+def test_table_collision_projection_qa_v2_blocks_weak_iou_that_legacy_accepts(tmp_path):
+    run_dir = tmp_path / "run"
+    _write_polygon(run_dir / "background" / "table_polygon_world.json")
+    mask = np.zeros((100, 100), dtype=np.uint8)
+    mask[22:78, 22:78] = 255
+    mask_path = run_dir / "background" / "tabletop_mask.png"
+    mask_path.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(mask).save(mask_path)
+    (run_dir / "camera.json").write_text(
+        json.dumps(
+            {
+                "K": [[100.0, 0.0, 50.0], [0.0, 100.0, 50.0], [0.0, 0.0, 1.0]],
+                "T_world_to_camera": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
+                "width": 100,
+                "height": 100,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    legacy = write_table_collision_projection_qa(run_dir)
+    strict = write_table_collision_projection_qa_v2(run_dir)
+
+    legacy_report = json.loads(legacy.report_path.read_text(encoding="utf-8"))
+    strict_report = json.loads(strict.report_path.read_text(encoding="utf-8"))
+    assert legacy_report["status"] == "passed"
+    assert 0.50 < legacy_report["projection_iou_with_tabletop_mask"] < 0.65
+    assert strict.report_path.name == "table_collision_report_v2.json"
+    assert strict_report["status"] == "blocked"
+    assert strict_report["weak_status"] == "diagnostic_pass"
+    assert "below_export_grade_tabletop_iou" in strict_report["blocking_reasons"]
+    assert strict_report["camera_intrinsics_source"] == "explicit"
+    assert strict_report["camera_extrinsics_source"] == "explicit"
+
+
+def test_table_collision_projection_qa_v2_blocks_camera_fallback_bridge(tmp_path):
+    run_dir = tmp_path / "run"
+    (run_dir / "background").mkdir(parents=True)
+    (run_dir / "background" / "table_polygon_world.json").write_text(
+        json.dumps(
+            {
+                "source_backend": "tabletop_mask_polygon_slab",
+                "geometry_type": "polygon_slab",
+                "polygon_world_xy": [[-0.2, 1.0], [0.2, 1.0], [0.2, 1.4], [-0.2, 1.4]],
+                "top_z_m": 0.0,
+                "support_height_m": 0.2,
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_mask(run_dir / "background" / "tabletop_mask.png")
+    (run_dir / "camera.json").write_text(
+        json.dumps({"fx": 100.0, "fy": 100.0, "cx": 50.0, "cy": 50.0, "width": 100, "height": 100}),
+        encoding="utf-8",
+    )
+
+    result = write_table_collision_projection_qa_v2(run_dir)
+
+    report = json.loads(result.report_path.read_text(encoding="utf-8"))
+    assert report["status"] == "blocked"
+    assert report["camera_intrinsics_source"] == "explicit"
+    assert report["camera_extrinsics_source"] == "fallback"
+    assert "camera_extrinsics_not_explicit" in report["blocking_reasons"]
 
 
 def test_table_collision_projection_qa_blocks_foreground_inflated_occlusion(tmp_path):

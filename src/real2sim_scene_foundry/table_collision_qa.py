@@ -15,6 +15,11 @@ MIN_TABLETOP_SELECTED_CANDIDATE_RATIO = 0.08
 MIN_TABLE_COLLISION_EXTENT_M = 0.12
 MIN_TABLE_COLLISION_PROJECTION_IOU = 0.5
 MAX_ACCEPTED_FOREGROUND_TO_TABLETOP_AREA_RATIO = 1.0
+EXPORT_GRADE_TABLETOP_IOU = 0.65
+EXPORT_GRADE_VISIBLE_IOU = 0.70
+MAX_EXPORT_GRADE_OVERREACH_RATIO = 0.15
+MAX_EXPORT_GRADE_UNDERCOVERAGE_RATIO = 0.20
+MAX_EXPORT_GRADE_FOREGROUND_TO_TABLETOP_AREA_RATIO = 0.20
 
 
 @dataclass(frozen=True)
@@ -197,6 +202,66 @@ def write_table_collision_projection_qa(
     )
 
 
+def write_table_collision_projection_qa_v2(run_dir: str | Path) -> TableCollisionQAResult:
+    """Write stricter export-grade tabletop projection QA without changing legacy QA."""
+    run = Path(run_dir)
+    legacy = write_table_collision_projection_qa(run)
+    report = dict(legacy.report)
+    camera = _load_json(run / "camera.json")
+    camera_intrinsics_source = "explicit" if _camera_matrix(camera) is not None else "missing"
+    camera_extrinsics_source = _camera_extrinsics_source(camera)
+    projection_iou = _float_or_none(report.get("projection_iou"))
+    tabletop_iou = _float_or_none(report.get("projection_iou_with_tabletop_mask"))
+    projected_area = _float_or_none(report.get("projected_polygon_area_px"))
+    tabletop_area = _float_or_none(report.get("tabletop_mask_area_px"))
+    intersection_area = _intersection_from_iou(tabletop_iou, projected_area, tabletop_area)
+    overreach_ratio = _safe_ratio(None if intersection_area is None or projected_area is None else projected_area - intersection_area, projected_area)
+    undercoverage_ratio = _safe_ratio(None if intersection_area is None or tabletop_area is None else tabletop_area - intersection_area, tabletop_area)
+
+    reasons = list(report.get("blocking_reasons", []))
+    if camera_intrinsics_source != "explicit":
+        reasons.append("camera_intrinsics_not_explicit")
+    if camera_extrinsics_source != "explicit":
+        reasons.append("camera_extrinsics_not_explicit")
+    if tabletop_iou is None or tabletop_iou < EXPORT_GRADE_TABLETOP_IOU:
+        reasons.append("below_export_grade_tabletop_iou")
+    if projection_iou is None or projection_iou < EXPORT_GRADE_VISIBLE_IOU:
+        reasons.append("below_export_grade_visible_iou")
+    if overreach_ratio is not None and overreach_ratio > MAX_EXPORT_GRADE_OVERREACH_RATIO:
+        reasons.append("table_collision_overreaches_visible_table")
+    if undercoverage_ratio is not None and undercoverage_ratio > MAX_EXPORT_GRADE_UNDERCOVERAGE_RATIO:
+        reasons.append("table_collision_under_covers_visible_table")
+    foreground_ratio = _float_or_none(report.get("foreground_to_tabletop_area_ratio"))
+    if foreground_ratio is not None and foreground_ratio > MAX_EXPORT_GRADE_FOREGROUND_TO_TABLETOP_AREA_RATIO:
+        reasons.append("blocked_tabletop_occlusion")
+    if report.get("exceeds_reference_bounds") is True:
+        reasons.append("table_collision_exceeds_reference_bounds")
+
+    blocking_reasons = _dedupe(reasons)
+    weak_status = "diagnostic_pass" if report.get("status") == "passed" and blocking_reasons else report.get("status", "unknown")
+    strict_report = {
+        **report,
+        "version": 2,
+        "status": "passed" if not blocking_reasons else "blocked",
+        "weak_status": weak_status,
+        "blocking_reasons": blocking_reasons,
+        "camera_intrinsics_source": camera_intrinsics_source,
+        "camera_extrinsics_source": camera_extrinsics_source,
+        "visible_projection_iou": projection_iou,
+        "export_grade_tabletop_iou_threshold": EXPORT_GRADE_TABLETOP_IOU,
+        "export_grade_visible_iou_threshold": EXPORT_GRADE_VISIBLE_IOU,
+        "overreach_ratio": overreach_ratio,
+        "max_overreach_ratio": MAX_EXPORT_GRADE_OVERREACH_RATIO,
+        "undercoverage_ratio": undercoverage_ratio,
+        "max_undercoverage_ratio": MAX_EXPORT_GRADE_UNDERCOVERAGE_RATIO,
+        "max_foreground_to_tabletop_area_ratio": MAX_EXPORT_GRADE_FOREGROUND_TO_TABLETOP_AREA_RATIO,
+        "legacy_report_path": "qa/table_collision_report.json",
+    }
+    report_path = run / "qa" / "table_collision_report_v2.json"
+    report_path.write_text(json.dumps(strict_report, indent=2), encoding="utf-8")
+    return TableCollisionQAResult(report_path=report_path, overlay_path=legacy.overlay_path, report=strict_report)
+
+
 def _load_json(path: Path) -> dict[str, Any]:
     if not path.is_file():
         return {}
@@ -257,6 +322,34 @@ def _world_to_camera(camera: dict[str, Any], *, support_height_m: float = 0.0) -
         [[1.0, 0.0, 0.0, 0.0], [0.0, 0.0, -1.0, -float(support_height_m)], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]],
         dtype=np.float64,
     )
+
+
+def _camera_extrinsics_source(camera: dict[str, Any]) -> str:
+    if "T_world_to_camera" in camera or "T_camera_to_world" in camera:
+        return "explicit" if _world_to_camera(camera) is not None else "invalid"
+    return "fallback"
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(result):
+        return None
+    return result
+
+
+def _safe_ratio(numerator: float | None, denominator: float | None) -> float | None:
+    if numerator is None or denominator is None or denominator <= 0.0:
+        return None
+    return float(max(0.0, numerator) / denominator)
+
+
+def _intersection_from_iou(iou: float | None, area_a: float | None, area_b: float | None) -> float | None:
+    if iou is None or area_a is None or area_b is None or iou < 0.0:
+        return None
+    return float(iou * (area_a + area_b) / (1.0 + iou))
 
 
 def _transform(value: Any) -> np.ndarray | None:
