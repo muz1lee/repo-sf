@@ -123,6 +123,45 @@ run/
 
 Strict QA must reject imported runs that fall back to estimated camera intrinsics, fallback camera extrinsics, or non-meter depth.
 
+## Record3D EXR+JPG Conversion
+
+Record3D's `EXR + JPG sequence` export can be converted into this contract with:
+
+```bash
+rsf import-record3d --record3d-dir <record3d_export> --out <capture_bundle>
+```
+
+The expected Record3D export layout is:
+
+```text
+record3d_export/
+  metadata.json
+  rgb/
+    0.jpg
+    1.jpg
+  depth/
+    0.exr
+    1.exr
+```
+
+The converter:
+
+- reads Record3D `metadata.json` for `K`, `poses`, `perFrameIntrinsicCoeffs`, and timestamps;
+- reads EXR depth from channel `2` by default;
+- resizes RGB frames to the depth resolution and scales intrinsics to that same resolution;
+- writes depth as `.npy` in meters;
+- derives `confidence/*.png` from finite positive depth because this Record3D export does not provide native ARKit confidence maps.
+
+Derived confidence is recorded as:
+
+```json
+{
+  "confidence_source": "depth_validity_derived"
+}
+```
+
+This is acceptable for engineering ingestion and geometry QA, but it must not be described as measured/native ARKit confidence.
+
 ## Nerfstudio Export
 
 `rsf export-nerfstudio-from-phone-capture --run-dir <run> --pose-world arkit|sim` exports:

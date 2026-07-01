@@ -12,6 +12,7 @@ __pycache__/
 .qwen_env.local
 
 runs/
+/test_data/
 outputs/
 output/
 cache/

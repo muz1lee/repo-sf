@@ -23,6 +23,7 @@ from .pose_refinement import (
     snap_object_poses_to_support,
 )
 from .proposals import ObjectProposal, QwenProposalClient, load_object_proposals
+from .record3d_capture import convert_record3d_export
 from .runtime_viewer import export_runtime_viewer
 from .support_plane import estimate_and_apply_support_plane
 from .video import prepare_rgb_video
@@ -244,6 +245,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"wrote {Path(args.run_dir) / 'capture_contract.json'}")
         print(f"status={report.get('status')}")
         return 0
+    if args.command == "import-record3d":
+        report = convert_record3d_export(
+            args.record3d_dir,
+            args.out,
+            frame_stride=args.frame_stride,
+            max_frames=args.max_frames,
+            depth_channel=args.depth_channel,
+        )
+        print(f"wrote {Path(args.out) / 'record3d_import_report.json'}")
+        print(f"wrote {Path(args.out) / 'capture_contract.json'}")
+        print(f"status={report.get('status')}")
+        return 0
     if args.command == "export-nerfstudio-from-phone-capture":
         report = export_nerfstudio_from_phone_capture(args.run_dir, pose_world=args.pose_world)
         print(f"wrote {Path(args.run_dir) / str(report.get('transforms_path', 'video/nerfstudio_phone/transforms.json'))}")
@@ -325,6 +338,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_video_scene_parser(subparsers, "video-scene")
     _add_validate_phone_capture_parser(subparsers)
     _add_import_phone_capture_parser(subparsers)
+    _add_import_record3d_parser(subparsers)
     _add_export_nerfstudio_phone_parser(subparsers)
     _add_export_manifest_parser(subparsers)
     _add_export_sim_parser(subparsers)
@@ -487,6 +501,15 @@ def _add_import_phone_capture_parser(subparsers: argparse._SubParsersAction) -> 
     parser = subparsers.add_parser("import-phone-capture")
     parser.add_argument("--capture-dir", required=True, type=Path)
     parser.add_argument("--run-dir", required=True, type=Path)
+
+
+def _add_import_record3d_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser("import-record3d")
+    parser.add_argument("--record3d-dir", required=True, type=Path)
+    parser.add_argument("--out", required=True, type=Path)
+    parser.add_argument("--frame-stride", type=int, default=1)
+    parser.add_argument("--max-frames", type=int, default=None)
+    parser.add_argument("--depth-channel", type=int, default=2)
 
 
 def _add_export_nerfstudio_phone_parser(subparsers: argparse._SubParsersAction) -> None:
