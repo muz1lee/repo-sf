@@ -1,76 +1,65 @@
 # SimFoundry Gap Ledger
 
-Audit date: 2026-07-01  
-Auditor: Subagent A, Paper-to-Code Auditor  
-Scope: documentation-only audit of the server-authoritative repository at `/mnt/workspace/wenqian/real2sim_scene_foundry`. No production code was changed.  
-Canonical evidence run: `runs/my_table_m7_20260630_185332`.
+审计日期：2026-07-01
+审计对象：服务器权威仓库 `/mnt/workspace/wenqian/real2sim_scene_foundry`
+canonical evidence run：`runs/my_table_m7_20260630_185332`
 
-## Status Semantics
+## 状态定义
 
-Implementation status uses the project snapshot and canonical run artifacts:
+实现状态：
 
-- `implemented`: code and canonical artifacts exist for the project contract.
-- `partial`: a usable implementation exists, but it is weaker than the paper target or relies on a documented substitute.
-- `missing`: no meaningful implementation or artifact was found.
-- `blocked`: the path is present but cannot be completed without an external service, runtime, or missing input.
+- `implemented`：代码和 canonical artifacts 已存在，满足项目工程 contract。
+- `partial`：有可用实现，但弱于论文目标，或依赖明确记录的替代方案。
+- `missing`：没有有意义的实现或 artifact。
+- `blocked`：工程路径存在，但缺外部服务、runtime 或必要输入，无法完成。
 
-Reproduction status is stricter:
+复现状态更严格：
 
-- `reproduced`: the canonical evidence demonstrates the paper-level effect for this item.
-- `partial`: the project demonstrates a practical or export-grade substitute, but not the full paper behavior.
-- `blocked`: the paper-level effect is blocked by missing runtime, service, or required data.
+- `reproduced`：canonical evidence 证明该项达到 paper-level effect。
+- `partial`：有实用工程替代，但未达到完整论文效果。
+- `blocked`：paper-level effect 被外部 runtime/service/data 缺口阻塞。
 
-A passed `sim_export_manifest.json`, passed `qa/sim_export_report.json`, or pytest result is not by itself paper-effect reproduction. The rows below judge paper targets against concrete artifacts and provenance.
+`pytest passed`、`sim_export_manifest.json passed` 或 `qa passed` 都不能单独证明 SimFoundry paper effect reproduced。
 
-## Evidence Sources Read
+## 快照摘要
 
-- Project startup/rules/plan: `AI_START_HERE.md`, `AGENTS.md`, `docs/superpowers/plans/2026-06-30-simfoundry-simulator-export-reproduction.md`.
-- SimFoundry paper: `https://arxiv.org/pdf/2606.28276`, Section 4 and Appendix E.1-E.5.
-- SimFoundry project page: `https://research.nvidia.com/labs/gear/simfoundry/`.
-- Source modules read or sampled: `background.py`, `video_bg_only.py`, `video_scene.py`, `background_registration.py`, `background_3dgs_render.py`, `visual_assets.py`, `collision_assets.py`, `pose_refinement.py`, `sim_export_manifest.py`, `usd_export.py`, `genesis_export.py`, `isaac_export.py`, `export_qa.py`, `composite_viewer.py`, `runtime_viewer.py`, CLI wiring in `cli.py`, and video scripts under `scripts/`.
-- Canonical run artifacts read: `extraction_manifest.json`, `scene_manifest.json`, `background/background_manifest.json`, `background/registration.json`, `video/bg_only_status.json`, `video/3dgs_status.json`, `video/colmap_status.json`, `video/moge_status.json`, `background/3dgs_native/asset_report.json`, `qa/background_3dgs_render_report.json`, `sim_export_manifest.json`, `qa/sim_export_report.json`, `qa/genesis_settle_report.json`, `qa/usd_export_report.json`, `qa/genesis_export_report.json`, `qa/isaac_load_report.json`, `qa/runtime_viewer_report.json`, `exports/composite_viewer/viewer_config.json`, `exports/composite_viewer/background_provenance_audit.json`, `exports/composite_viewer/object_path_audit.json`, visual/collision/pose/physics per-object reports, and mesh statistics for visual/collision/debug assets.
-- Endpoint safety note: this audit did not call any unregistered SAM3D HTTP endpoint. `SAM3D_PROCESS_URL` must come from the current environment/service registry, and canonical visual meshes are tied to recorded mesh-job artifacts rather than a hard-coded address.
+- canonical objects：`bottle`、`cup`、`tissue_pack`。
+- BG-only video：`video/bg_only_status.json` 为 `completed`，131 frames，其中 36 frames 在 proposal failure 后复用了上一帧 mask。
+- 3DGS training：`video/3dgs_status.json` 为 `completed`，方法是 Nerfstudio `splatfacto`。
+- 3DGS native candidate：`background/3dgs_native/splat_rgb.ply` 存在且 header 字段完整，`gaussian_count=179536`。
+- 3DGS registration：`background/registration.json` 为 `partial_external_render_only`；`T_3dgs_world_to_sim_world=null`；`registrations.3dgs.status=blocked_missing_camera_pose_scale_evidence`。
+- 背景渲染：`qa/background_3dgs_render_report.json` 为 `rendered`，backend 是 `external_3dgs_renderer`，`simulator_native=false`。
+- simulator export：最终 `sim_export_manifest.json` 和 `qa/sim_export_report.json` 应在 `background_unregistered` 上 fail closed。
+- Genesis settle：fresh CPU settle 可通过，无 fall-out / NaN；但 `qa/settled_pose_delta_report.json` 仍为 `partial`，因为 moved pose 未写回。
+- Isaac：`qa/isaac_load_report.json` 的 loaded 证据来自 `preserved_existing_worker_report`，`validation_reused=true`，不是 fresh direct validation。
+- object visual：`objects/*/visual.glb` 是高拓扑 visual mesh；legacy `mesh_aligned.glb` 仍是 8-vertex / 12-face debug-era box。
+- collision：object collision assets 是 convex hull，不是 CoACD。
+- table collision：`qa/table_collision_report.json` 为 `passed`，`source_backend=tabletop_mask_polygon_slab`，`projection_iou=0.531253837651971`，threshold `0.5`，真实 `table_collision.glb` 是 190 vertices / 348 faces，不是 bbox proxy。
 
-## Snapshot Evidence Summary
+## 对照表
 
-- Worktree was dirty before the audit; existing modified/untracked code and docs were preserved.
-- Canonical run objects: `bottle`, `cup`, `tissue_pack`.
-- `video/bg_only_status.json`: `status=completed`, `frame_count=131`, `inpaint_backend=http_inpaint:http://localhost:5092/inpaint`, `failure_count=36`, all failures reused the previous mask.
-- `video/3dgs_status.json`: `status=completed`, `method=splatfacto`, `latest_config=video/3dgs/unnamed/splatfacto/2026-06-30_205848/config.yml`, `latest_checkpoint=video/3dgs/unnamed/splatfacto/2026-06-30_205848/nerfstudio_models/step-000002999.ckpt`.
-- `background/registration.json`: `status=partial_external_render_only`; `registrations.bg_only_cloud.status=registered`; `registrations.3dgs.status=blocked_missing_camera_pose_scale_evidence`; `T_3dgs_world_to_sim_world=null`; `transform_sources.T_3dgs_world_to_sim_world=blocked_missing_camera_pose_scale_evidence`.
-- `qa/background_3dgs_render_report.json`: `status=rendered`, `backend=external_3dgs_renderer`, `simulator_native=false`, reference-view sidecar only.
-- `sim_export_manifest.json`: `status=blocked`, `blocking_reasons=[background_unregistered]`; export artifacts exist but full reconstructed-scene completion is fail-closed on background registration/native-runtime gaps.
-- `qa/sim_export_report.json`: `overall_status=blocked`, `blocking_reasons=[background_unregistered]`; pose, table collision, collision assets, USD, Genesis, and preserved Isaac sections are present, but background registration blocks full success.
-- `qa/genesis_settle_report.json`: fresh Genesis CPU settle completed with `stability_status=passed`, `max_penetration_depth_m=0.0`, `max_displacement_m=0.1520448999055857`, no NaN, no fall-out, no excessive displacement. `qa/settled_pose_delta_report.json` remains `status=partial` because moved poses are not written back.
-- `qa/isaac_load_report.json`: `status=loaded`, `report_source=preserved_existing_worker_report`, `validation_reused=true`, `direct_runtime_validation=false`; native 3DGS modules such as `omni.splat` and `omni.gaussian_splatting` are unavailable in that report.
-- Visual meshes are no longer 8-vertex bbox visuals in the canonical export: `visual.glb` stats are bottle 102678 vertices / 205368 faces, cup 491820 / 983488, tissue_pack 664242 / 1328464. Legacy `mesh_aligned.glb` files remain 8-vertex / 12-face debug-era boxes.
-- Collision assets are explicit but convex-hull based, not CoACD: bottle 4623 vertices / 9242 faces, cup 44782 / 89560, tissue_pack 11715 / 23426.
-- `qa/table_collision_report.json`: `status=passed`, `source_backend=tabletop_mask_polygon_slab`, `geometry_type=polygon_slab`, `projection_iou=0.531253837651971`, `iou_threshold=0.5`; actual `background/table_collision.glb` has 190 vertices / 348 faces, not an 8/12 bbox proxy.
+| 项目 | 实现状态 | 复现状态 | 当前证据 | 剩余差距 |
+| --- | --- | --- | --- | --- |
+| extraction | partial | partial | 有 video manifest、MoGe/COLMAP、Qwen/SAM proposals、masks/crops/object clouds、scene manifest | 不是完整论文式 iterative RGB-D inpainting foreground decomposition |
+| foreground removal | partial | partial | 有 `background/foreground_mask.png`、`bg_only.png`、`bg_only_cloud.ply` 和 video BG-only frames | 主要是 RGB inpaint + metric cloud masking；depth inpaint/iteration provenance 不完整 |
+| BG-only video | partial | partial | 131 frames 完成，36 frames 复用 previous mask | 不是 SAM2-style propagation，stale mask 不能 silent pass |
+| 3DGS training | implemented | partial | `splatfacto` 训练完成，有 config/checkpoint 和 PLY candidate | 不是 Appendix E.5 的完整 depth-supervised + pose optimization 路径 |
+| 3DGS registration | partial | blocked | `T_3dgs_world_to_sim_world=null`，3DGS registration blocked | 缺 shared camera pose / metric scale evidence 或手动 SE(3)+scale editor 输出 |
+| object mesh | implemented | partial | `objects/*/visual.glb` 已作为 final visual path，bbox 只作 debug/proxy | backend 和质量评估不等同 Hunyuan/TRELLIS 论文路径 |
+| pose alignment | partial | partial | 有 manual/refined pose report、support alignment、projection overlay | 不是 service-backed FoundationPose-equivalent refinement |
+| collision geometry | partial | partial | 有独立 `objects/*/collision.glb` | 当前是 convex hull，不是 CoACD/VHACD |
+| physics annotation | implemented | partial | 有 `objects/*/physics.json`，mass/friction 被 export 使用 | 来源是 scene manifest/heuristic，不是完整 VLM inference |
+| physics stability | implemented | partial | Genesis settle 通过，无 fall-out/NaN | moved pose 未回写；settle runtime 主要用 collision assets |
+| simulator export | partial | blocked | `scene.usda`、`genesis_scene.py`、`isaac_scene.py` 存在 | full export blocked by `background_unregistered` 和 Isaac preserved-report caveat |
+| interactive viewer | partial | blocked | viewer 显示 object visual、collision/table toggles、external 3DGS sidecar provenance | 不是 live/native 3DGS；orbit 时必须承认 reference-view sidecar |
 
-## Gap Ledger
+## 仍需解决的核心 gap
 
-| Item | Implementation status | Reproduction status | Paper target | Current implementation evidence | Required acceptance | Final status rationale |
-| --- | --- | --- | --- | --- | --- | --- |
-| extraction | partial | partial | Section 4 and Appendix E.1 target a raw RGB video path: choose a representative frame, estimate metric depth/intrinsics, lift RGB-D to a scene point cloud, identify foreground objects with a scene VLM plus SAM3, align to a ground-plane simulator frame, and iteratively remove objects from RGB-D until no foreground remains. | `video/video_manifest.json` records RGB video sampling; `video/moge_status.json` and `video/colmap_status.json` are completed; `extraction_manifest.json` contains three Qwen/SAM object proposals, masks, crops, object clouds, mass/friction seeds, and valid XYZ ratios. `scene_manifest.json` has coordinate frames, support plane, object transforms, and background pointer fields. | A fresh run must show representative RGB-D extraction, per-object RGB-D crops/masks, scene point cloud, ground-plane alignment, and iterative residual-scene decomposition provenance, with failures surfaced instead of hidden. | The project has a working artifact-first extraction path, but it is not fully paper-equivalent: current evidence is Qwen/SAM plus MoGe/S2M2-style project geometry and does not prove the paper's iterative RGB-D inpainting loop as the mechanism for all foreground decomposition. |
-| foreground removal | partial | partial | Section 4 and Appendix E.1 remove each extracted object from RGB and depth observations using image and depth inpainting so later objects can be detected from the residual scene. Appendix E.5 extends this to video masks and inpainted foreground-free frames. | Single-frame artifacts exist: `background/foreground_mask.png`, `background/bg_only.png`, `background/bg_only_cloud.ply`, and `background/background_manifest.json`. Video artifacts exist under `video/bg_only/frames` and `video/bg_only/masks`. `video/bg_only_status.json` used HTTP inpaint on 131 frames. | Foreground removal must record RGB and depth inpainting provenance, residual-scene iteration order, and per-frame mask source. Reused masks or OpenCV fallback outputs must be diagnostic unless explicitly accepted. | Usable foreground removal is implemented, but current evidence is RGB inpainting plus metric cloud masking, not full image+depth inpainting. Video removal reused prior masks on 36 frames, so it should remain partial rather than reproduced. |
-| BG-only video | partial | partial | Appendix E.5.1 constructs a per-frame foreground mask by keyframe category enumeration, SAM3 mask refinement, video segmentation propagation, and two-pass video inpainting to produce clean static-scene RGB frames. | `video/bg_only_status.json` has `status=completed`, `frame_count=131`, `outputs.frames_dir=video/bg_only/frames`, `outputs.masks_dir=video/bg_only/masks`, and observed labels. It also records 36 proposal failures with `reused_previous_mask=true`. | Acceptance requires temporally grounded mask tracks with source labels such as propagated keyframe mask, per-frame refinement, or diagnostic reused mask. The final 3DGS dataset must not silently include stale masks. | The artifact exists and supports 3DGS training, but the method is per-frame Qwen/SAM proposals plus mask reuse, not SAM2-style propagation plus VOID-style two-pass inpainting. This is a practical substitute, not paper reproduction. |
-| 3DGS training | implemented | partial | Section 4 and Appendix E.5 train a background 3DGS from the foreground-free stream; the automatic path uses metric depth and pose recovery, a seed cloud, photometric loss, depth loss, and per-camera pose optimization. | `scripts/rsf_video_3dgs.sh` prepares a Nerfstudio dataset from `video/bg_only/frames` and COLMAP poses, then runs `ns-train splatfacto`. `video/3dgs_status.json` is completed with config and checkpoint paths. `background/3dgs_native/splat_rgb.ply` has an asset report with `status=asset_format_complete`. | Acceptance requires a trained 3DGS with dataset provenance, camera poses, metric scale handling, and either the paper's depth-supervised automatic path or an explicitly documented substitute. | Training is present and completed, but evidence points to standard Nerfstudio `splatfacto` with COLMAP/BG-only frames, not the full DepthAnything3 depth-supervised training and pose optimizer described in Appendix E.5. |
-| 3DGS registration | partial | blocked | Appendix E.5.1 derives a rigid bridge from the splat world into the simulator world by composing the anchor-frame camera pose from background reconstruction with the ground-plane extraction frame; Appendix E.5.2 permits manual SE(3)+scale alignment for a second background-only capture. | `background/registration.json` now fails closed: `status=partial_external_render_only`, `registrations.bg_only_cloud.status=registered`, `registrations.3dgs.status=blocked_missing_camera_pose_scale_evidence`, and `T_3dgs_world_to_sim_world=null`. `qa/background_registration_overlay.png` exists for diagnostic/reference evidence, but not a native 3DGS bridge. | Acceptance requires a numeric non-placeholder transform with scale source and validation overlay. For automatic reproduction, the transform must be derived from shared camera/world frames; for manual reproduction, it must be serialized from an editor action. | Current code no longer promotes an identity placeholder. Paper-level 3DGS-to-sim registration is blocked until shared camera-pose/scale evidence or a serialized manual SE(3)+scale editor action exists. |
-| object mesh | implemented | partial | Section 4 and Appendix E.2 generate per-object visual meshes from object crops using a 2D-to-3D mesh model such as Hunyuan or TRELLIS, then align them to RGB-D scene evidence. | `objects/*/visual.glb` exist and are high-topology meshes. `objects/*/visual_asset_report.json` and `qa/collision_rebuild_report.json` record `source=sam3d_mesh_job_download_glb_aligned` with raw mesh provenance. `objects/*/mesh_aligned.glb` remain 8-vertex bbox debug-era artifacts, but canonical viewer/export paths use `visual.glb`. | Acceptance requires final visual assets to be non-bbox meshes or accepted visual point clouds, with source, quality report, raw backend provenance, and export gates blocking bbox visual success. | The project now has real visual mesh assets and blocks bbox-as-visual success. It is still partial versus the paper because the backend is SAM3D mesh job rather than the paper's listed Hunyuan/TRELLIS path, and visual quality is not evaluated with the same reconstruction benchmark. |
-| pose alignment | partial | partial | Section 4 and Appendix E.2 refine 6D object poses by aligning generated meshes against RGB-D, object masks, point cloud geometry, and a pose model such as FoundationPose. Manual tuning is acceptable when explicit. | `objects/*/pose.json` and `objects/*/pose_refinement_report.json` exist. `qa/reference_projection_refinement_report.json` and `qa/pose_support_alignment_report.json` have `status=accepted`, `source=manual_refined_from_auto`, bbox/overlay scale refinement, and support-plane snapping. `scene_manifest.json` still marks `needs_manual_refine=true` for objects, while `sim_export_manifest.json` accepts pose reports as ready. | Acceptance requires real 6D transforms with source fields for rotation, translation, and scale; service-backed pose refinement or explicit manual refinement; projection/depth/support QA; and export blocking when unrefined objects remain. | The export contract is satisfied by explicit manual refinement, but the paper-level automatic FoundationPose-style 6D refinement is not reproduced. Current rotations are mostly canonical coordinate-frame/manual orientation adjustments, not independent pose-model evidence. |
-| collision geometry | partial | partial | Section 4 and Appendix E.4 generate object collision meshes using CoACD before physics depenetration. | `objects/*/collision.glb` exist and are separate from `visual.glb` and `debug_bbox.glb`. `qa/collision_rebuild_report.json` records `collision_source=convex_hull_from_visual_mesh` and `method=trimesh_convex_hull`. | Acceptance requires explicit collision geometry provenance and either CoACD/VHACD or a documented accepted substitute, plus export/load evidence that simulators consume collision assets separately from visuals. | Asset separation is implemented, but CoACD is not. Convex hulls are a reasonable engineering substitute for this run, so this remains partial rather than reproduced. |
-| physics annotation | implemented | partial | Section 4 assigns physical properties such as mass and friction by querying a scene VLM; Appendix E.3 also discusses physical parameters for articulated links. | `objects/*/physics.json` exist with mass, friction, restitution, density basis, source, visual/collision/debug references. `extraction_manifest.json` stores Qwen proposal mass/friction seeds; `sim_export_manifest.json` copies per-object physics as ready. | Acceptance requires per-object physical parameters, source/provenance, simulator-consumable use, and invalid-value export blocking. For paper-level reproduction, VLM-generated values should be tied to object semantics and checked in simulation. | The project has explicit physics annotations consumed by export/Genesis. It is partial against the paper because the values are coarse scene-manifest fields, not a demonstrated robust physical-parameter inference pipeline. |
-| physics stability | implemented | partial | Appendix E.4 spawns the reconstructed scene in PyBullet, steps the simulation while forcing velocities to zero to depenetrate, and caches settled poses for stable subsequent initialization. | Fresh Genesis CPU settle completed with `stability_status=passed`, `max_penetration_depth_m=0.0`, `max_displacement_m=0.1520448999055857`, no fall-out, and explicit collision/support loading. `qa/settled_pose_delta_report.json` is `status=partial`: bottle moved 0.152 m and cup 0.093 m, while `pose_written_back=false`. | Acceptance requires simulator settle/depenetration, no NaN/fall-out/excessive penetration, and cached stable poses if the run will be reinitialized from settled state. | Stability QA is reproduced for this Genesis run, but settled-pose contract remains partial because moved poses are exposed rather than written back, and visual-physics coherence remains partial because the settle runtime uses collision assets rather than the final visual/background scene. |
-| simulator export | partial | blocked | Section 4 exports the stable sim-ready scene to downstream robotics simulators such as IsaacLab, with visual meshes, collision geometry, physics, support surfaces, and background assets. | `exports/scene.usda`, `exports/genesis_scene.py`, and `exports/isaac_scene.py` exist. Final `sim_export_manifest.json` is `status=blocked` and `qa/sim_export_report.json` is `overall_status=blocked`, both for `background_unregistered`. USD and Genesis sections pass; Isaac is `loaded` only via `preserved_existing_worker_report`, with `validation_reused=true` and `direct_runtime_validation=false`. | Acceptance requires a simulator-loadable bundle with real mesh references, collision metadata, physical parameters, support surface, reference camera, loader scripts, repeatable runtime validation, and native/registered reconstructed background support reported honestly. | The export bundle is useful for object/collision/support debugging, but full SimFoundry simulator export is blocked by the unregistered/native-missing 3DGS background and the Isaac repeatability caveat. |
-| interactive viewer | partial | blocked | The project page presents interactive reconstructed scenes with a hybrid 3DGS background plus textured object meshes. Appendix E.5.2 also describes an editor that aligns a background splat via SE(3)+scale when using a second foreground-free capture. | `exports/composite_viewer/index.html` and `viewer_config.json` exist. Viewer config is `status=partial`, `status_reason=partial_external_render_only`, `render_mode=external_3dgs_png_sidecar`, `live_3dgs_runtime=false`, `orbit_policy=locked_to_reference_camera`, and `simulator_native=false`. Runtime viewer artifacts exist for Genesis. | Acceptance requires interactive inspection of textured object meshes, collision/debug toggles, registered background visualization, and, for the manual background route, persisted SE(3)+scale 3DGS alignment edits. | The viewer is honest and useful as a reference-view inspection UI, but the project-page effect with live hybrid 3DGS background is blocked by native/runtime and registration gaps. |
-
-## Remaining Gaps
-
-1. Replace per-frame BG-only mask reuse with a temporally grounded mask track: SAM2-style propagation or equivalent, explicit per-frame provenance, and no silent stale masks in final 3DGS training data.
-2. Add or prove depth-supervised 3DGS training if paper-level automatic background reproduction is required; current Nerfstudio `splatfacto` training is a practical substitute.
-3. Replace `T_3dgs_world_to_sim_world=null` / `blocked_missing_camera_pose_scale_evidence` with a derived automatic rigid bridge or a serialized manual SE(3)+scale alignment.
-4. Integrate native 3DGS visualization/rendering in the viewer or simulator, or keep the current B-route sidecar explicitly marked `simulator_native=false`.
-5. Add service-backed 6D pose refinement, such as FoundationPose-equivalent output, or keep manual refinement as a recorded but partial substitute.
-6. Replace convex-hull collision generation with CoACD/VHACD when final paper-equivalent collision geometry is required.
-7. Make Isaac validation repeatable from the server-side workflow or keep `preserved_existing_worker_report` as a repeatability caveat.
-8. If physics stability is meant to match Appendix E.4, cache settled poses as the initial state and record the depenetration method, not only the Genesis QA final positions.
+1. 用 temporally grounded mask track 替换 per-frame BG-only mask reuse。
+2. 如果要 paper-level automatic background reproduction，需要补 depth-supervised 3DGS 或明确记录替代路径。
+3. 用 derived bridge 或 manual editor 输出替换 `T_3dgs_world_to_sim_world=null`。
+4. 接入 browser/simulator native 3DGS runtime，或继续把 sidecar 标成 `simulator_native=false`。
+5. 增加 service-backed 6D pose refinement，或继续把 manual refinement 标成 partial。
+6. 用 CoACD/VHACD 替换 convex hull collision。
+7. 让 Isaac validation 能从服务器 workflow 可重复执行，或继续保留 `preserved_existing_worker_report` caveat。
+8. 如果 physics stability 要达到 Appendix E.4，必须缓存 settled pose 或在 viewer/export 中明确展示 initial/settled 差异。

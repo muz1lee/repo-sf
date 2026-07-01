@@ -1,32 +1,32 @@
 # real2sim-scene-foundry
 
-Engineering reproduction of the upper real-to-sim pipeline from SimFoundry-style scene reconstruction. The project turns stereo or video observations into object assets, metric scene manifests, collision geometry, simulator exports, QA reports, and an interactive inspection viewer.
+`real2sim-scene-foundry` 是一个面向 SimFoundry 风格 real-to-sim 场景重建的工程仓库。它把双目图片或 RGB 视频输入整理成物体资产、metric scene manifest、碰撞几何、仿真导出、QA 报告和可交互检查 viewer。
 
-This repository is an engineering workbench, not a claim of full SimFoundry paper reproduction. The current canonical run is fail-closed: object meshes, table collision, Genesis settle, USD/Genesis/Isaac export scaffolds, and viewer provenance exist, while native/live 3DGS background registration remains blocked.
+这个仓库是工程复现工作台，不是“已经完整复现 SimFoundry 论文效果”的声明。当前 canonical run 已经采用 fail-closed 策略：object mesh、table collision、Genesis settle、USD/Genesis/Isaac export 骨架和 viewer provenance 已经存在；native/live 3DGS 背景注册仍是主要 blocker。
 
-## Current Status
+## 当前状态
 
-- Object visuals: `objects/*/visual.glb` are the final visual paths; legacy `mesh_aligned.glb` files are debug/proxy only.
-- Background: trained 3DGS sidecar assets can exist, but the viewer currently uses an external reference-view PNG sidecar unless a native splat runtime is integrated.
-- Physics: object collision meshes and support surfaces are exported separately from visual meshes.
-- Export: `sim_export_manifest.json` and `qa/sim_export_report.json` are intended to fail closed when background registration, native runtime, weak table QA, or stale Isaac evidence is detected.
-- Viewer: `rsf composite-viewer` is an inspection UI that explicitly reports whether the background is live 3DGS, external sidecar, or diagnostic point cloud.
+- 物体视觉资产：最终视觉路径是 `objects/*/visual.glb`；legacy `mesh_aligned.glb` 只允许作为 debug/proxy。
+- 背景：可以存在训练后的 3DGS sidecar 资产，但 viewer 当前仍使用外部 reference-view PNG sidecar，除非后续接入 native splat runtime。
+- 物理：object collision mesh 和 support surface 与 visual mesh 分离导出。
+- 导出：`sim_export_manifest.json` 和 `qa/sim_export_report.json` 应在背景未注册、native runtime 缺失、table QA 过弱或 Isaac evidence 过期时 fail closed。
+- Viewer：`rsf composite-viewer` 是检查 UI，会明确报告背景是 live 3DGS、external sidecar 还是 diagnostic point cloud。
 
-## Repository Layout
+## 仓库结构
 
 ```text
-src/real2sim_scene_foundry/   Python package and CLI implementation
-tests/                        Unit and regression tests
-scripts/                      Server-side helper scripts for video/3DGS workflows
-docs/                         Gap ledgers, runtime probes, and publishing notes
-AGENTS.md                     Project rules for future agents
-AI_START_HERE.md              Handoff facts for new AI/Codex sessions
-PLAN.md                       Development plan and current milestones
+src/real2sim_scene_foundry/   Python package 和 CLI 实现
+tests/                        单元测试和回归测试
+scripts/                      服务器侧 video / 3DGS 辅助脚本
+docs/                         gap ledger、runtime probe、发布说明
+AGENTS.md                     后续 agent 的项目规则
+AI_START_HERE.md              新 AI/Codex 会话的启动事实
+PLAN.md                       开发计划和当前 milestone
 ```
 
-Generated artifacts are intentionally excluded from Git: `runs/`, `outputs/`, virtual environments, videos, point clouds, meshes, checkpoints, USD exports, and rendered images.
+生成产物默认不进 Git：`runs/`、`outputs/`、虚拟环境、视频、点云、mesh、checkpoint、USD 导出和渲染图都应被忽略。
 
-## Setup
+## 安装
 
 ```bash
 python3 -m venv .venv
@@ -36,15 +36,15 @@ python -m pip install -e '.[dev]'
 python -m pytest tests -q
 ```
 
-The CLI entrypoint is:
+CLI 入口：
 
 ```bash
 rsf --help
 ```
 
-## Common Commands
+## 常用命令
 
-Canonical stereo smoke input, when available on the project server:
+服务器上有 smoke 数据时，可以跑双目 smoke：
 
 ```bash
 rsf smoke \
@@ -54,7 +54,7 @@ rsf smoke \
   --out runs/smoke_041
 ```
 
-Refresh key canonical artifacts:
+刷新 canonical artifacts：
 
 ```bash
 rsf support-plane --run-dir runs/my_table_m7_20260630_185332 --force
@@ -66,32 +66,32 @@ rsf qa-sim --run-dir runs/my_table_m7_20260630_185332
 rsf composite-viewer --run-dir runs/my_table_m7_20260630_185332 --export-only
 ```
 
-Start the viewer server:
+启动 viewer：
 
 ```bash
 rsf composite-viewer --run-dir runs/my_table_m7_20260630_185332 --host 127.0.0.1 --port 7010
 ```
 
-If the viewer is running on a remote server, forward the port before opening the browser:
+如果 viewer 跑在远端服务器上，先做端口转发：
 
 ```bash
 ssh -fN -o ExitOnForwardFailure=yes -L 7010:127.0.0.1:7010 wenqian_h200
 ```
 
-## Environment
+## 环境变量
 
-See `.env.example` for optional service variables. SAM3D intentionally has no hard-coded default endpoint; set `SAM3D_PROCESS_URL` only after verifying the current service registry.
+参考 `.env.example`。SAM3D 没有硬编码默认 endpoint；只有在当前服务注册表确认后，才设置 `SAM3D_PROCESS_URL`。
 
-The project can call external services for segmentation, depth, inpainting, 3D asset generation, 3DGS training, Genesis, and Isaac validation. Tests are written to run without those services.
+项目可以调用外部 segmentation、depth、inpainting、3D asset generation、3DGS training、Genesis 和 Isaac validation 服务。测试应能在没有这些服务的情况下运行。
 
-## GitHub Publishing Notes
+## GitHub 发布说明
 
-Before pushing, read `docs/GITHUB_PUBLISHING.md`. In particular:
+发布前先读 `docs/GITHUB_PUBLISHING.md`。尤其注意：
 
-- Do not commit `runs/`, `.venv*/`, model weights, videos, GLB/PLY/USD outputs, checkpoints, or screenshots.
-- Decide whether the repository is private or public before publishing files that mention internal server paths or service addresses.
-- Choose a license before making a public repository.
+- 不要提交 `runs/`、`.venv*/`、模型权重、视频、GLB/PLY/USD 输出、checkpoint 或截图。
+- 如果 repo 需要公开，先脱敏内部服务器路径、SSH alias、服务地址和 run 名称。
+- 公开仓库前先选择 license。
 
 ## License
 
-No license has been selected yet. Until a license is added, treat the repository as private/internal or all-rights-reserved.
+当前尚未选择 license。添加 license 前，请把仓库视为 private/internal 或 all-rights-reserved。

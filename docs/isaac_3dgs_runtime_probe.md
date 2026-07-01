@@ -1,15 +1,15 @@
-# Isaac Native 3DGS Runtime Probe
+# Isaac Native 3DGS Runtime 探测报告
 
-Date: 2026-07-01 Asia/Shanghai
+日期：2026-07-01 Asia/Shanghai
 
-Worker:
+Worker：
 
 ```text
 ssh -p 1024 root@101.132.143.105
 /isaac-sim/python.sh
 ```
 
-Probe command:
+探测命令：
 
 ```bash
 scp -P 1024 /tmp/rsf_isaac_e_patch/isaac_3dgs_probe.py root@101.132.143.105:/tmp/rsf_isaac_3dgs_probe.py
@@ -17,7 +17,7 @@ ssh -p 1024 root@101.132.143.105 "/isaac-sim/python.sh /tmp/rsf_isaac_3dgs_probe
 ssh -p 1024 root@101.132.143.105 "cat /tmp/rsf_isaac_3dgs_probe_result.json"
 ```
 
-Result summary:
+结果摘要：
 
 ```json
 {
@@ -40,14 +40,14 @@ Result summary:
 }
 ```
 
-Log evidence:
+日志证据：
 
-- `Simulation App Startup Complete` appears in `/tmp/rsf_isaac_3dgs_probe.log`, so the probe ran after `SimulationApp` startup.
-- Isaac emitted unrelated extension import errors, including missing `/isaac-sim/exts/omni.isaac.ml_archive/pip_prebundle/torch/_vendor/packaging/_structures.py`; these did not prevent the 3DGS capability probe from completing.
+- `/tmp/rsf_isaac_3dgs_probe.log` 中出现 `Simulation App Startup Complete`，说明探测发生在 `SimulationApp` 启动之后。
+- Isaac 同时输出了一些无关 extension import error，包括缺少 `/isaac-sim/exts/omni.isaac.ml_archive/pip_prebundle/torch/_vendor/packaging/_structures.py`；这些错误没有阻止 3DGS capability probe 完成。
 
-Conclusion:
+结论：
 
-The current Isaac worker does not expose native Gaussian splat / splat PLY rendering capability through the extension manager, candidate Python modules, or USD plugin/file-format registry. `isaac_load_report.json` should therefore use:
+当前 Isaac worker 没有通过 extension manager、候选 Python module 或 USD plugin/file-format registry 暴露 native Gaussian splat / splat PLY 渲染能力。因此 `isaac_load_report.json` 应写成：
 
 ```json
 {
@@ -57,4 +57,4 @@ The current Isaac worker does not expose native Gaussian splat / splat PLY rende
 }
 ```
 
-Native validation of `background/3dgs_native/splat_rgb.ply` must remain blocked until a splat-capable Isaac/Omniverse extension or USD plugin is installed and detected after `SimulationApp` startup.
+在安装并探测到支持 splat 的 Isaac/Omniverse extension 或 USD plugin 之前，`background/3dgs_native/splat_rgb.ply` 的 native validation 必须保持 blocked。

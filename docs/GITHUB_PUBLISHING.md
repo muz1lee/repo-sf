@@ -1,10 +1,10 @@
-# GitHub Publishing Checklist
+# GitHub 发布检查清单
 
-Use this checklist before pushing `real2sim_scene_foundry` to GitHub.
+把 `real2sim_scene_foundry` 推到 GitHub 前，按这个清单检查。
 
-## 1. Verify The Repo
+## 1. 验证仓库
 
-Run from the repository root:
+在仓库根目录运行：
 
 ```bash
 source .venv/bin/activate
@@ -12,41 +12,41 @@ python -m pytest tests -q
 rsf --help
 ```
 
-Expected: tests pass and the CLI prints command help.
+期望结果：测试通过，CLI 能打印 help。
 
-## 2. Review What Will Be Committed
+## 2. 检查将要提交的文件
 
 ```bash
 git status --short
 git status --short --ignored
 ```
 
-Files that should be committed:
+应该提交的文件：
 
 - `src/real2sim_scene_foundry/**/*.py`
 - `tests/**/*.py`
-- `scripts/*.sh` and `scripts/README.md`
+- `scripts/*.sh` 和 `scripts/README.md`
 - `README.md`
 - `.gitignore`
 - `.env.example`
 - `pyproject.toml`
-- `AGENTS.md`, `AI_START_HERE.md`, `PLAN.md`
+- `AGENTS.md`、`AI_START_HERE.md`、`PLAN.md`
 - `docs/**/*.md`
 - `.github/workflows/tests.yml`
 
-Files that should not be committed:
+不应该提交的文件：
 
 - `runs/`
-- `outputs/` or `output/`
-- `.venv/`, `.venv_3dgs/`
-- `.qwen_env.local`, `.env`, `.env.*` except `.env.example`
+- `outputs/` 或 `output/`
+- `.venv/`、`.venv_3dgs/`
+- `.qwen_env.local`、`.env`、`.env.*`，但 `.env.example` 除外
 - `__patch_incoming__/`
-- model checkpoints and weights
-- generated videos, meshes, point clouds, USD files, screenshots, and rendered images
+- 模型 checkpoint 和权重
+- 生成的视频、mesh、点云、USD 文件、截图和渲染图
 
-## 3. Run A Secret Scan
+## 3. 做一次轻量 secret scan
 
-This is a lightweight scan over tracked files plus untracked files that are not ignored. It is not a substitute for GitHub secret scanning:
+这个命令只扫描 tracked 文件和未被 ignore 的 untracked 文件。它不能替代 GitHub secret scanning。
 
 ```bash
 git ls-files -co --exclude-standard -z |
@@ -55,21 +55,21 @@ git ls-files -co --exclude-standard -z |
   true
 ```
 
-Review every hit. Documentation and placeholder variable names are fine; real credentials are not.
+逐条检查命中结果。文档里的占位变量名和测试里的假 key 可以接受；真实凭证不能提交。
 
-## 4. Decide Public vs Private
+## 4. 决定 private 还是 public
 
-This project currently contains environment-specific server paths, SSH aliases, and service registry notes in the agent handoff docs. That is acceptable for a private repo. For a public repo, sanitize:
+本项目包含服务器路径、SSH alias、服务注册表和 run 记录。这些信息适合 private repo。若要 public，先脱敏：
 
-- server hostnames and SSH aliases
-- internal filesystem paths
-- cloud worker addresses
-- service URLs that should not be public
-- run names tied to private datasets
+- 服务器 hostname 和 SSH alias
+- 内部文件系统路径
+- cloud worker 地址
+- 不应公开的服务 URL
+- 绑定私有数据集的 run 名称
 
-## 5. Commit
+## 5. 提交
 
-Recommended first commit after review:
+推荐命令：
 
 ```bash
 git add .gitignore .env.example README.md pyproject.toml AGENTS.md AI_START_HERE.md PLAN.md docs scripts src tests .github
@@ -77,18 +77,18 @@ git status --short
 git commit -m "chore: prepare real2sim scene foundry for GitHub"
 ```
 
-If `git status --short` shows generated artifacts, stop and update `.gitignore` before committing.
+如果 `git status --short` 里出现生成产物，先停下来更新 `.gitignore`。
 
-## 6. Push
+## 6. 推送
 
-Create the GitHub repository first, then:
+创建 GitHub repo 后：
 
 ```bash
 git remote add origin git@github.com:<your-org-or-user>/real2sim_scene_foundry.git
 git push -u origin m2-m4-qwen-sam3d-align
 ```
 
-If this should become the default branch, rename or merge it after the first push:
+如果要把当前分支设为默认分支，可以 rename 或 merge：
 
 ```bash
 git branch -M main
