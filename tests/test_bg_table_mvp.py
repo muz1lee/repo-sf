@@ -31,6 +31,38 @@ def _write_ascii_splat(path: Path, points: list[tuple[float, float, float]]) -> 
     path.write_text("\n".join(header + rows) + "\n", encoding="utf-8")
 
 
+def _write_ascii_gaussian_splat(path: Path, points: list[tuple[float, float, float]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    header = [
+        "ply",
+        "format ascii 1.0",
+        f"element vertex {len(points)}",
+        "property float x",
+        "property float y",
+        "property float z",
+        "property float nx",
+        "property float ny",
+        "property float nz",
+        "property uchar red",
+        "property uchar green",
+        "property uchar blue",
+        "property float opacity",
+        "property float scale_0",
+        "property float scale_1",
+        "property float scale_2",
+        "property float rot_0",
+        "property float rot_1",
+        "property float rot_2",
+        "property float rot_3",
+        "end_header",
+    ]
+    rows = [
+        f"{x} {y} {z} 0 0 0 220 180 120 1.0 0.01 0.01 0.01 1 0 0 0"
+        for x, y, z in points
+    ]
+    path.write_text("\n".join(header + rows) + "\n", encoding="utf-8")
+
+
 def _write_bg_table_run(run: Path) -> None:
     (run / "background").mkdir(parents=True)
     (run / "frames").mkdir()
@@ -212,6 +244,28 @@ def test_qa_bg_table_passes_without_objects_and_writes_overlays(tmp_path):
     assert report["3dgs_overlay"]["uses_T_3dgs_world_to_sim_world"] is True
     assert (run / "qa" / "bg3dgs_table_overlay_000000.png").is_file()
     assert report["splat_center_diagnostic"]["collision_geometry_source"] == "not_used"
+
+
+def test_qa_bg_table_applies_nerfstudio_gaussian_asset_axis_bridge_for_center_diagnostic(tmp_path):
+    run = tmp_path / "run"
+    _write_bg_table_run(run)
+    _write_ascii_gaussian_splat(
+        run / "background" / "3dgs_native" / "splat_rgb.ply",
+        [(-0.1, -0.1, -1.0), (0.0, 0.0, -1.0), (0.1, 0.1, -1.0), (0.5, 0.5, -1.2)],
+    )
+    main(["build-table-collision", "--run-dir", str(run), "--source", "background/table_polygon_world.json", "--write"])
+
+    code = main(["qa-bg-table", "--run-dir", str(run), "--frames", "0", "--write-overlays"])
+
+    assert code == 0
+    report = json.loads((run / "qa" / "bg_table_report.json").read_text(encoding="utf-8"))
+    diagnostic = report["splat_center_diagnostic"]
+    assert diagnostic["status"] == "computed"
+    assert diagnostic["asset_axis_bridge"]["status"] == "applied_for_nerfstudio_gaussian_ply_diagnostic"
+    assert diagnostic["asset_axis_bridge"]["matrix"] == [[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]]
+    assert diagnostic["near_plane_inside_polygon_count"] == 3
+    assert diagnostic["near_plane_inside_polygon_ratio"] == pytest.approx(1.0)
+    assert diagnostic["transform_source"] == "diagnostic_splat_asset_to_sim_world"
 
 
 def test_qa_bg_table_blocks_when_registered_transform_is_missing(tmp_path):

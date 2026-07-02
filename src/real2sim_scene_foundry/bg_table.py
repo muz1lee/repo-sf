@@ -28,6 +28,7 @@ MAX_DEPTH_PLANE_MEDIAN_ABS_RESIDUAL_M = 0.02
 MAX_DEPTH_PLANE_P90_ABS_RESIDUAL_M = 0.05
 DEFAULT_SLAB_THICKNESS_M = 0.03
 ARKIT_TO_SIM_BRIDGE_SOURCE = "phone_sim_alignment_arkit_to_sim_world"
+NERFSTUDIO_GAUSSIAN_ASSET_AXIS_BRIDGE = np.diag([1.0, -1.0, -1.0, 1.0])
 
 
 @dataclass(frozen=True)
@@ -1022,10 +1023,18 @@ def _scale_intrinsics_to_image(k: np.ndarray, camera: dict[str, Any], image_shap
 
 
 def _splat_center_diagnostic(run: Path, polygon: dict[str, Any], t_3dgs_world_to_sim: np.ndarray | None) -> dict[str, Any]:
-    centers, _colors = _load_splat_centers(run / "background" / "3dgs_native" / "splat_rgb.ply", max_points=100000)
+    centers, _colors, metadata = _load_splat_centers(run / "background" / "3dgs_native" / "splat_rgb.ply", max_points=100000)
+    asset_bridge = _splat_asset_axis_bridge(metadata)
+    bridge_report = _splat_axis_bridge_report(asset_bridge)
     if centers.size == 0 or t_3dgs_world_to_sim is None:
-        return {"status": "unavailable", "near_plane_inside_polygon_ratio": None, "collision_geometry_source": "not_used"}
-    centers_sim = _transform_points(centers, t_3dgs_world_to_sim)
+        return {
+            "status": "unavailable",
+            "near_plane_inside_polygon_ratio": None,
+            "asset_axis_bridge": bridge_report,
+            "collision_geometry_source": "not_used",
+        }
+    diagnostic_transform = t_3dgs_world_to_sim @ asset_bridge
+    centers_sim = _transform_points(centers, diagnostic_transform)
     top_z = float(polygon.get("top_z_m", polygon.get("table_top_z_m", 0.0)) or 0.0)
     near = np.abs(centers_sim[:, 2] - top_z) <= 0.05
     near_count = int(np.count_nonzero(near))
@@ -1034,6 +1043,9 @@ def _splat_center_diagnostic(run: Path, polygon: dict[str, Any], t_3dgs_world_to
             "status": "no_near_plane_splats",
             "near_plane_inside_polygon_ratio": None,
             "near_plane_count": 0,
+            "asset_axis_bridge": bridge_report,
+            "T_splat_asset_to_sim_world": diagnostic_transform.tolist(),
+            "transform_source": _splat_diagnostic_transform_source(asset_bridge),
             "collision_geometry_source": "not_used",
         }
     inside = _points_inside_any_polygon(centers_sim[near, :2], _polygon_xy_sets(polygon))
@@ -1043,9 +1055,35 @@ def _splat_center_diagnostic(run: Path, polygon: dict[str, Any], t_3dgs_world_to
         "near_plane_count": near_count,
         "near_plane_inside_polygon_count": inside_count,
         "near_plane_inside_polygon_ratio": float(inside_count / near_count),
+        "near_plane_threshold_m": 0.05,
+        "asset_axis_bridge": bridge_report,
+        "T_splat_asset_to_sim_world": diagnostic_transform.tolist(),
+        "transform_source": _splat_diagnostic_transform_source(asset_bridge),
         "source": "splat_centers_diagnostic_only_not_collision_source",
         "collision_geometry_source": "not_used",
     }
+
+
+def _splat_asset_axis_bridge(metadata: dict[str, Any]) -> np.ndarray:
+    if metadata.get("schema") == "nerfstudio_gaussian_ply":
+        return NERFSTUDIO_GAUSSIAN_ASSET_AXIS_BRIDGE.copy()
+    return np.eye(4, dtype=np.float64)
+
+
+def _splat_axis_bridge_report(transform: np.ndarray) -> dict[str, Any]:
+    applied = not np.allclose(transform, np.eye(4, dtype=np.float64))
+    return {
+        "status": "applied_for_nerfstudio_gaussian_ply_diagnostic" if applied else "not_required_for_plain_ply_diagnostic",
+        "matrix": transform.tolist(),
+        "diagnostic_only": True,
+        "not_written_to_registration_json": True,
+    }
+
+
+def _splat_diagnostic_transform_source(transform: np.ndarray) -> str:
+    if np.allclose(transform, np.eye(4, dtype=np.float64)):
+        return "registration_T_3dgs_world_to_sim_world"
+    return "diagnostic_splat_asset_to_sim_world"
 
 
 def _semantic_fit_blocked_report(run: Path, reasons: list[str], mask_path: Path, frame_index: int, hull: str) -> dict[str, Any]:
@@ -1237,13 +1275,13 @@ def _backproject_depth(depth: np.ndarray, k: np.ndarray, t_camera_to_world: np.n
     return points_world[np.all(np.isfinite(points_world), axis=1)]
 
 
-def _load_splat_centers(path: Path, *, max_points: int) -> tuple[np.ndarray, np.ndarray | None]:
+def _load_splat_centers(path: Path, *, max_points: int) -> tuple[np.ndarray, np.ndarray | None, dict[str, Any]]:
     if not path.is_file():
-        return np.empty((0, 3), dtype=np.float64), None
+        return np.empty((0, 3), dtype=np.float64), None, {}
     data = path.read_bytes()
     header_end = data.find(b"end_header")
     if header_end < 0:
-        return np.empty((0, 3), dtype=np.float64), None
+        return np.empty((0, 3), dtype=np.float64), None, {}
     header_stop = data.find(b"\n", header_end)
     header_stop = len(data) if header_stop < 0 else header_stop + 1
     header = data[:header_stop].decode("utf-8", errors="replace").splitlines()
@@ -1261,8 +1299,9 @@ def _load_splat_centers(path: Path, *, max_points: int) -> tuple[np.ndarray, np.
                 vertex_count = int(parts[2])
         elif in_vertex and len(parts) >= 3 and parts[0] == "property":
             properties.append((parts[1], parts[2]))
+    metadata = _splat_ply_metadata(fmt, vertex_count, properties)
     if vertex_count <= 0:
-        return np.empty((0, 3), dtype=np.float64), None
+        return np.empty((0, 3), dtype=np.float64), None, metadata
     count = min(vertex_count, int(max_points))
     if fmt == "ascii":
         rows = data[header_stop:].decode("utf-8", errors="ignore").splitlines()[:count]
@@ -1273,16 +1312,27 @@ def _load_splat_centers(path: Path, *, max_points: int) -> tuple[np.ndarray, np.
             dtype=np.float64,
         )
         colors = _ascii_colors(values, name_to_idx)
-        return centers, colors
+        return centers, colors, metadata
     if fmt != "binary_little_endian":
-        return np.empty((0, 3), dtype=np.float64), None
+        return np.empty((0, 3), dtype=np.float64), None, metadata
     dtype = np.dtype([(name, _ply_dtype(typ)) for typ, name in properties])
     records = np.frombuffer(data, dtype=dtype, count=count, offset=header_stop)
     centers = np.column_stack([records["x"], records["y"], records["z"]]).astype(np.float64)
     colors = None
     if all(name in records.dtype.names for name in ("red", "green", "blue")):
         colors = np.column_stack([records["red"], records["green"], records["blue"]]).astype(np.uint8)
-    return centers, colors
+    return centers, colors, metadata
+
+
+def _splat_ply_metadata(fmt: str, vertex_count: int, properties: list[tuple[str, str]]) -> dict[str, Any]:
+    property_names = [name for _typ, name in properties]
+    gaussian_fields = {"opacity", "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3"}
+    return {
+        "format": fmt,
+        "vertex_count": int(vertex_count),
+        "property_names": property_names,
+        "schema": "nerfstudio_gaussian_ply" if gaussian_fields.issubset(set(property_names)) else "plain_ply",
+    }
 
 
 def _ascii_colors(values: list[list[str]], name_to_idx: dict[str, int]) -> np.ndarray | None:
