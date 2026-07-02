@@ -46,6 +46,39 @@ def _write_record3d_export(root: Path, *, frame_count: int = 3) -> None:
     )
 
 
+def _write_record3d_native_bundle(root: Path, *, frame_count: int = 3) -> None:
+    (root / "rgbd").mkdir(parents=True)
+    poses = []
+    intrinsics = []
+    timestamps = []
+    for idx in range(frame_count):
+        Image.new("RGB", (8, 6), color=(idx * 40, 30, 50)).save(root / "rgbd" / f"{idx}.jpg")
+        depth = np.full((3, 4), 1.0 + idx * 0.01, dtype=np.float32)
+        (root / "rgbd" / f"{idx}.depth").write_bytes(depth.tobytes())
+        confidence = np.full((3, 4), 2, dtype=np.uint8)
+        (root / "rgbd" / f"{idx}.conf").write_bytes(confidence.tobytes())
+        poses.append([0.0, 0.0, 0.0, 1.0, 0.06 * idx, 0.0, 0.0])
+        intrinsics.append([8.0, 8.0, 4.0, 3.0])
+        timestamps.append(float(idx) / 30.0)
+    (root / "metadata").write_text(
+        json.dumps(
+            {
+                "w": 8,
+                "h": 6,
+                "dw": 4,
+                "dh": 3,
+                "K": [8.0, 0.0, 0.0, 0.0, 8.0, 0.0, 4.0, 3.0, 1.0],
+                "poses": poses,
+                "perFrameIntrinsicCoeffs": intrinsics,
+                "frameTimestamps": timestamps,
+                "fps": 30,
+                "cameraType": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def test_convert_record3d_export_writes_valid_phone_capture_bundle(tmp_path):
     record3d = tmp_path / "record3d"
     bundle = tmp_path / "bundle"
@@ -77,6 +110,26 @@ def test_convert_record3d_export_writes_valid_phone_capture_bundle(tmp_path):
     assert poses["coordinate_frame"] == "arkit_world"
     assert poses["depth_camera_to_pose_camera_bridge"] == "opencv_to_arkit_camera"
     assert poses["poses"][2]["T_camera_to_world"][0][3] == 0.12
+
+
+def test_convert_record3d_export_supports_native_r3d_bundle_layout(tmp_path):
+    record3d = tmp_path / "record3d_native"
+    bundle = tmp_path / "bundle"
+    _write_record3d_native_bundle(record3d)
+
+    report = convert_record3d_export(record3d, bundle)
+
+    assert report["status"] == "converted"
+    assert report["frame_count"] == 3
+    assert report["capture_contract"]["status"] == "passed"
+    metadata = json.loads((bundle / "metadata.json").read_text(encoding="utf-8"))
+    assert metadata["source_format"] == "record3d_native_r3d_bundle"
+    assert metadata["confidence_source"] == "record3d_confidence"
+    depth = np.load(bundle / "depth" / "frame_000002.npy")
+    assert depth.shape == (3, 4)
+    assert np.isclose(float(depth[0, 0]), 1.02)
+    confidence = np.asarray(Image.open(bundle / "confidence" / "frame_000000.png").convert("L"))
+    assert np.all(confidence == 2)
 
 
 def test_convert_record3d_export_supports_stride_and_max_frames(tmp_path):
