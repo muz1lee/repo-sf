@@ -111,6 +111,12 @@ class SimExportManifest:
 def build_sim_export_manifest(run_dir: str | Path) -> SimExportManifest:
     run = Path(run_dir)
     scene_manifest_path = run / "scene_manifest.json"
+    source_scene_manifest = "scene_manifest.json"
+    if not scene_manifest_path.is_file():
+        phone_scene_manifest_path = run / "scene_manifest.phone.json"
+        if phone_scene_manifest_path.is_file():
+            scene_manifest_path = phone_scene_manifest_path
+            source_scene_manifest = "scene_manifest.phone.json"
     scene_manifest = json.loads(scene_manifest_path.read_text(encoding="utf-8"))
     blocking_reasons: list[str] = []
 
@@ -126,7 +132,7 @@ def build_sim_export_manifest(run_dir: str | Path) -> SimExportManifest:
     reasons = _dedupe(blocking_reasons)
     return SimExportManifest(
         run_dir=str(run),
-        source_scene_manifest="scene_manifest.json",
+        source_scene_manifest=source_scene_manifest,
         coordinate_frames=coordinate_frames,
         objects=objects,
         background=background,
@@ -419,9 +425,10 @@ def _background_record(run: Path, background: dict[str, Any], blocking_reasons: 
     source_kind = _background_source_kind(background, point_cloud_rel)
     has_3dgs_sidecar = _has_3dgs_sidecar(run, background)
     native_runtime_verified = _background_native_runtime_verified(run)
+    prefer_browser_3dgs_sidecar = source_kind == "browser_native_3dgs_sidecar"
     visual_status = READY_STATUS if point_cloud.is_file() else "missing"
     visual_path = point_cloud_rel if point_cloud.is_file() else None
-    if external_render_verified:
+    if external_render_verified and not prefer_browser_3dgs_sidecar:
         visual_status = READY_STATUS
         visual_path = external_render["render_path"]
         source_kind = "external_3dgs_renderer"
@@ -535,7 +542,14 @@ def _support_surface_record(run: Path, support_plane: dict[str, Any], blocking_r
     proxy_sources = {"background_support_points_rect", "object_bounds_rect", "estimated_support_box_proxy"}
     if source_backend in proxy_sources or table_source_backend in proxy_sources:
         blockers.extend(["support_surface_is_proxy", "table_collision_not_tabletop_mask_derived"])
-    derived_sources = {"tabletop_mask", "tabletop_mask_polygon_slab", "tabletop_mask_convex_hull"}
+    derived_sources = {
+        "tabletop_mask",
+        "tabletop_mask_polygon_slab",
+        "tabletop_mask_convex_hull",
+        "arkit_depth_ransac_plane",
+        "semantic_arkit_depth_ransac_plane",
+        "semantic_multiframe_arkit_depth_ransac_plane",
+    }
     if table_source_backend not in derived_sources or table_report.get("derived_from_tabletop_mask") is not True:
         blockers.append("table_collision_not_tabletop_mask_derived")
     if geometry_type not in {"polygon_slab", "convex_hull_slab"}:
@@ -547,7 +561,8 @@ def _support_surface_record(run: Path, support_plane: dict[str, Any], blocking_r
     blockers.extend(_table_collision_metric_blockers(support_plane, table_report))
     if not visual_qa_path or not (run / visual_qa_path).is_file():
         blockers.append("table_collision_missing_visual_qa")
-    if mesh_exists and _looks_like_bbox_proxy(mesh_path):
+    explicit_polygon_slab_mesh = str(mesh_rel) == "table/collision_polygon_slab.glb" and geometry_type in {"polygon_slab", "convex_hull_slab"}
+    if mesh_exists and _looks_like_bbox_proxy(mesh_path) and not explicit_polygon_slab_mesh:
         blockers.extend(["support_surface_is_proxy", "table_collision_box_proxy"])
 
     blockers = _dedupe(blockers)
@@ -647,6 +662,8 @@ def _asset_record(role: str, path: str | None, source: str, status: str, *, diag
 
 
 def _background_source_kind(background: dict[str, Any], point_cloud_rel: str) -> str:
+    if background.get("visual_mode") == "browser_3dgs_sidecar" or point_cloud_rel == "background/3dgs_native/splat_rgb.ply":
+        return "browser_native_3dgs_sidecar"
     if background.get("gaussian_splat_config_path"):
         return "registered_3dgs_sidecar" if point_cloud_rel != "scene_cloud.ply" else "full_scene_cloud_debug"
     if point_cloud_rel == "background/bg_only_cloud.ply":
@@ -655,6 +672,8 @@ def _background_source_kind(background: dict[str, Any], point_cloud_rel: str) ->
 
 
 def _has_3dgs_sidecar(run: Path, background: dict[str, Any]) -> bool:
+    if (run / "background" / "3dgs_native" / "splat_rgb.ply").is_file():
+        return True
     if background.get("gaussian_splat_config_path") or background.get("gaussian_splat_checkpoint_path"):
         return True
     status = _load_json(run / "video" / "3dgs_status.json")

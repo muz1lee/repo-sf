@@ -15,7 +15,7 @@ from .bg_table import fit_tabletop_multiframe_from_semantic_masks
 from .bg_table import fit_tabletop_from_semantic_mask
 from .bg_table import qa_bg_table
 from .bg_table import segment_tabletop_semantic_mask
-from .bg_table_sim import export_bg_table_physics_smoke
+from .bg_table_sim import export_bg_table_physics_smoke, export_phone_bg_table_mvp
 from .composite_viewer import export_composite_viewer, qa_viewer, serve_composite_viewer
 from .defaults import SAM3D_PROCESS_URL, SAM3_SEGMENT_URL
 from .interactive import export_interactive_scene
@@ -430,6 +430,21 @@ def main(argv: list[str] | None = None) -> int:
         print(f"wrote {result.report_path}")
         print(f"status={result.report.get('status')}")
         return 0
+    if args.command == "export-phone-bg-table-mvp":
+        result = export_phone_bg_table_mvp(
+            args.run_dir,
+            cube_size_m=args.cube_size_m,
+            drop_height_m=args.drop_height_m,
+            settle_steps=args.settle_steps,
+        )
+        print(f"wrote {result.scene_manifest_path}")
+        print(f"wrote {result.sim_export_manifest_path}")
+        print(f"wrote {result.usd_path}")
+        print(f"wrote {result.genesis_script_path}")
+        print(f"wrote {result.settle_report_path}")
+        print(f"wrote {result.report_path}")
+        print(f"status={result.report.get('status')}")
+        return 0
     if args.command == "export-sim":
         artifacts = export_sim(args.run_dir, backends=args.backend)
         for name, path in artifacts.items():
@@ -484,6 +499,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_build_table_collision_parser(subparsers)
     _add_qa_bg_table_parser(subparsers)
     _add_export_bg_table_sim_smoke_parser(subparsers)
+    _add_export_phone_bg_table_mvp_parser(subparsers)
     for name in ("export", "render"):
         subparsers.add_parser(name)
     return parser
@@ -779,6 +795,14 @@ def _add_qa_bg_table_parser(subparsers: argparse._SubParsersAction) -> None:
 
 def _add_export_bg_table_sim_smoke_parser(subparsers: argparse._SubParsersAction) -> None:
     parser = subparsers.add_parser("export-bg-table-sim-smoke")
+    parser.add_argument("--run-dir", required=True, type=Path)
+    parser.add_argument("--cube-size-m", type=float, default=0.08)
+    parser.add_argument("--drop-height-m", type=float, default=0.12)
+    parser.add_argument("--settle-steps", type=int, default=120)
+
+
+def _add_export_phone_bg_table_mvp_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser("export-phone-bg-table-mvp")
     parser.add_argument("--run-dir", required=True, type=Path)
     parser.add_argument("--cube-size-m", type=float, default=0.08)
     parser.add_argument("--drop-height-m", type=float, default=0.12)

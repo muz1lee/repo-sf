@@ -6,8 +6,9 @@ import pytest
 import trimesh
 from PIL import Image
 
-from real2sim_scene_foundry.bg_table_sim import export_bg_table_physics_smoke
+from real2sim_scene_foundry.bg_table_sim import export_bg_table_physics_smoke, export_phone_bg_table_mvp
 from real2sim_scene_foundry.cli import main
+from real2sim_scene_foundry.export_qa import write_sim_export_report
 
 
 def _identity4():
@@ -393,6 +394,98 @@ def test_cli_export_bg_table_sim_smoke_writes_report(tmp_path):
     assert report["status"] == "script_written"
     assert report["test_object"]["size_m"] == pytest.approx(0.06)
     assert report["run_command"].endswith("--no-viewer")
+
+
+def test_export_phone_bg_table_mvp_writes_formal_manifest_and_honest_claims(tmp_path):
+    run = tmp_path / "run"
+    _write_bg_table_run(run)
+    polygon_path = run / "background" / "table_polygon_world.json"
+    polygon = json.loads(polygon_path.read_text(encoding="utf-8"))
+    polygon["source_backend"] = "semantic_multiframe_arkit_depth_ransac_plane"
+    polygon["geometry_type"] = "convex-hull_from_multiframe_semantic_masked_depth_plane"
+    polygon_path.write_text(json.dumps(polygon), encoding="utf-8")
+    main(["build-table-collision", "--run-dir", str(run), "--source", "background/table_polygon_world.json", "--write"])
+    main(["qa-bg-table", "--run-dir", str(run), "--frames", "0", "--write-overlays"])
+    export_bg_table_physics_smoke(run, cube_size_m=0.08, drop_height_m=0.12, settle_steps=64)
+    Image.new("RGB", (100, 100), color=(20, 24, 28)).save(run / "qa" / "background_3dgs_render.png")
+    (run / "qa" / "background_3dgs_render_report.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "status": "rendered",
+                "backend": "external_3dgs_renderer",
+                "render_path": "qa/background_3dgs_render.png",
+                "registered_3dgs_rendered": True,
+                "simulator_native": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run / "qa" / "table_physics_smoke_runtime_report.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "status": "completed",
+                "stability_status": "passed",
+                "settle_steps": 64,
+                "test_object": {
+                    "object_id": "table_smoke_cube",
+                    "shape": "cube",
+                    "size_m": 0.08,
+                    "initial_center_world_m": [0.0, 0.0, 1.16],
+                    "final_center_world_m": [0.001, 0.0, 1.039],
+                    "expected_resting_center_z_m": 1.04,
+                    "bottom_z_m": 0.999,
+                    "contact_gap_m": -0.001,
+                    "horizontal_drift_m": 0.001,
+                },
+                "checks": {
+                    "contact_ok": True,
+                    "horizontal_drift_ok": True,
+                    "nan_detected": False,
+                    "fall_below_table": False,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = export_phone_bg_table_mvp(run)
+
+    assert result.report["status"] == "exported"
+    assert result.scene_manifest_path == run / "scene_manifest.phone.json"
+    assert result.sim_export_manifest_path == run / "sim_export_manifest.json"
+    assert result.usd_path == run / "exports" / "scene.usda"
+    assert result.genesis_script_path == run / "exports" / "genesis_scene.py"
+    assert result.settle_report_path == run / "qa" / "genesis_settle_report.json"
+    assert result.report_path == run / "qa" / "phone_bg_table_mvp_report.json"
+    scene = json.loads(result.scene_manifest_path.read_text(encoding="utf-8"))
+    assert scene["scene_type"] == "phone_bg_table_physics_mvp"
+    assert scene["objects"] == []
+    assert scene["background"]["point_cloud_path"] == "background/3dgs_native/splat_rgb.ply"
+    manifest = json.loads(result.sim_export_manifest_path.read_text(encoding="utf-8"))
+    assert manifest["source_scene_manifest"] == "scene_manifest.phone.json"
+    assert manifest["objects"] == []
+    assert manifest["background"]["visual_asset"]["source_kind"] == "browser_native_3dgs_sidecar"
+    assert manifest["background"]["visual_asset"]["simulator_native"] is False
+    assert manifest["background"]["registration"]["status"] == "registered"
+    assert manifest["support_surface"]["status"] == "ready"
+    assert manifest["exports"]["usd"]["path"] == "exports/scene.usda"
+    assert manifest["exports"]["genesis"]["path"] == "exports/genesis_scene.py"
+    assert "missing_backend_export:isaac" in manifest["blocking_reasons"]
+    assert "missing_support_surface_collision" not in manifest["blocking_reasons"]
+    assert "missing_background_visual" not in manifest["blocking_reasons"]
+
+    qa = write_sim_export_report(run, strict_claims=True).report
+
+    assert qa["sections"]["background_registration"]["status"] == "passed"
+    assert qa["sections"]["table_collision_projection"]["status"] == "passed"
+    assert qa["sections"]["physics_settle"]["status"] == "passed"
+    assert qa["sections"]["usd_export"]["status"] == "passed"
+    assert qa["sections"]["genesis_export"]["status"] == "passed"
+    assert qa["claim_gate"]["engineering_interactive_scene_status"] == "passed"
+    assert qa["claim_gate"]["simfoundry_upper_reproduction_status"] == "partial"
+    assert "simulator_native_3dgs_runtime" in qa["claim_gate"]["remaining_gaps"]
 
 
 def test_qa_bg_table_blocks_when_table_polygon_projection_overreaches_visible_mask(tmp_path):

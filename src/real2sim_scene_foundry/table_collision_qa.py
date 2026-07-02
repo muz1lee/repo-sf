@@ -146,8 +146,17 @@ def write_table_collision_projection_qa(
             if projection_iou < iou_threshold:
                 reasons.append("low_tabletop_projection_iou")
 
-    derived_sources = {"tabletop_mask", "tabletop_mask_polygon_slab", "tabletop_mask_convex_hull", "arkit_depth_point_cloud_plane"}
-    derived = source_backend in derived_sources and geometry_type in {"polygon_slab", "convex_hull_slab"}
+    derived_sources = {
+        "tabletop_mask",
+        "tabletop_mask_polygon_slab",
+        "tabletop_mask_convex_hull",
+        "arkit_depth_point_cloud_plane",
+        "arkit_depth_ransac_plane",
+        "semantic_arkit_depth_ransac_plane",
+        "semantic_multiframe_arkit_depth_ransac_plane",
+    }
+    derived_geometries = {"polygon_slab", "convex_hull_slab", "support_plane_polygon"}
+    derived = source_backend in derived_sources and geometry_type in derived_geometries
     if not derived:
         reasons.append("table_collision_not_tabletop_mask_derived")
     if selected_candidate_ratio is not None and selected_candidate_ratio < MIN_TABLETOP_SELECTED_CANDIDATE_RATIO:

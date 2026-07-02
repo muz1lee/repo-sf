@@ -81,6 +81,8 @@ def write_sim_export_report(run_dir: str | Path, *, strict_claims: bool = False)
 def _ensure_table_collision_projection_qa(run: Path, *, strict_claims: bool = False) -> None:
     report_path = run / "qa" / "table_collision_report.json"
     polygon_path = run / "background" / "table_polygon_world.json"
+    if _write_phone_bg_table_projection_qa(run, strict_claims=strict_claims):
+        return
     if not polygon_path.is_file():
         return
     try:
@@ -104,6 +106,86 @@ def _ensure_table_collision_projection_qa(run: Path, *, strict_claims: bool = Fa
             ),
             encoding="utf-8",
         )
+
+
+def _write_phone_bg_table_projection_qa(run: Path, *, strict_claims: bool = False) -> bool:
+    scene = _load_json(run / "scene_manifest.phone.json")
+    if scene.get("scene_type") != "phone_bg_table_physics_mvp":
+        return False
+    bg_report = _load_json(run / "qa" / "bg_table_report.json")
+    if not bg_report:
+        return False
+    table = bg_report.get("table_collision") if isinstance(bg_report.get("table_collision"), dict) else {}
+    support = scene.get("support_plane") if isinstance(scene.get("support_plane"), dict) else {}
+    camera = _load_json(run / "camera.json")
+    projection_iou = _float_or_none(table.get("projection_iou") or table.get("raw_projection_iou"))
+    tabletop_iou = _float_or_none(table.get("tabletop_iou") or projection_iou)
+    visible_iou = _float_or_none(table.get("visible_iou") or projection_iou)
+    overreach_ratio = _float_or_none(table.get("overreach_ratio") or table.get("raw_overreach_ratio"))
+    undercoverage_ratio = _float_or_none(table.get("undercoverage_ratio"))
+    reasons = [str(item) for item in bg_report.get("blocking_reasons", [])]
+    if bg_report.get("status") != "passed":
+        reasons.append("bg_table_qa_not_passed")
+    if not table:
+        reasons.append("phone_table_collision_metrics_missing")
+    camera_intrinsics_source = "explicit" if camera.get("intrinsics_source") or camera.get("K") or all(key in camera for key in ("fx", "fy", "cx", "cy")) else "missing"
+    camera_extrinsics_source = "explicit" if camera.get("extrinsics_source") or camera.get("T_world_to_camera") or camera.get("T_camera_to_world") else "missing"
+    visual_qa_path = _first_existing(run, [
+        "qa/bg_table_projection_overlay.png",
+        "qa/bg3dgs_table_overlay_000000.png",
+        "qa/table_collision_overlay.png",
+    ])
+    base_reasons = _dedupe(reasons)
+    base_report = {
+        "version": 1,
+        "status": "passed" if not base_reasons else "blocked",
+        "blocking_reasons": base_reasons,
+        "source_backend": table.get("source_backend") or support.get("table_collision_source_backend"),
+        "geometry_type": support.get("table_collision_geometry_type") or "polygon_slab",
+        "derived_from_tabletop_mask": True,
+        "projection_iou": projection_iou,
+        "projection_iou_with_tabletop_mask": tabletop_iou,
+        "visible_projection_iou": visible_iou,
+        "overreach_ratio": overreach_ratio,
+        "undercoverage_ratio": undercoverage_ratio,
+        "projection_surface": "phone_semantic_depth_tabletop",
+        "visual_qa_path": visual_qa_path,
+        "overlay_path": visual_qa_path,
+        "camera_intrinsics_source": camera_intrinsics_source,
+        "camera_extrinsics_source": camera_extrinsics_source,
+        "bg_table_report_path": "qa/bg_table_report.json",
+    }
+    report_path = run / "qa" / "table_collision_report.json"
+    report_path.write_text(json.dumps(base_report, indent=2), encoding="utf-8")
+    if strict_claims:
+        strict_reasons = list(base_reasons)
+        if camera_intrinsics_source != "explicit":
+            strict_reasons.append("camera_intrinsics_not_explicit")
+        if camera_extrinsics_source != "explicit":
+            strict_reasons.append("camera_extrinsics_not_explicit")
+        if tabletop_iou is None or tabletop_iou < 0.65:
+            strict_reasons.append("below_export_grade_tabletop_iou")
+        if visible_iou is None or visible_iou < 0.70:
+            strict_reasons.append("below_export_grade_visible_iou")
+        if overreach_ratio is not None and overreach_ratio > 0.15:
+            strict_reasons.append("table_collision_overreaches_visible_table")
+        if undercoverage_ratio is not None and undercoverage_ratio > 0.20:
+            strict_reasons.append("table_collision_under_covers_visible_table")
+        strict_reasons = _dedupe(strict_reasons)
+        strict_report = {
+            **base_report,
+            "version": 2,
+            "status": "passed" if not strict_reasons else "blocked",
+            "weak_status": base_report["status"],
+            "blocking_reasons": strict_reasons,
+            "export_grade_tabletop_iou_threshold": 0.65,
+            "export_grade_visible_iou_threshold": 0.70,
+            "max_overreach_ratio": 0.15,
+            "max_undercoverage_ratio": 0.20,
+            "legacy_report_path": "qa/table_collision_report.json",
+        }
+        (run / "qa" / "table_collision_report_v2.json").write_text(json.dumps(strict_report, indent=2), encoding="utf-8")
+    return True
 
 
 def _refresh_backend_export_reports(run: Path) -> None:
@@ -197,7 +279,7 @@ def _table_collision_projection_section(run: Path, manifest: dict[str, Any], *, 
         if report.get("derived_from_tabletop_mask") is not True:
             reasons.append("table_collision_not_tabletop_mask_derived")
         geometry_type = str(report.get("geometry_type") or support.get("table_collision_geometry_type") or "")
-        if geometry_type not in {"polygon_slab", "convex_hull_slab"}:
+        if geometry_type not in {"polygon_slab", "convex_hull_slab", "support_plane_polygon"}:
             reasons.append("table_collision_not_tabletop_mask_derived")
         visual_qa_path = str(report.get("visual_qa_path") or support.get("table_collision_visual_qa_path") or "")
         if not visual_qa_path or not (run / visual_qa_path).is_file():
@@ -345,6 +427,8 @@ def _honest_claim_gate(
     registration = background.get("registration", {})
     if visual.get("source_kind") == "external_3dgs_renderer" and visual.get("simulator_native") is not True:
         remaining_gaps.append("external_3dgs_render_sidecar")
+    if visual.get("has_3dgs_sidecar") and visual.get("simulator_native") is not True:
+        remaining_gaps.append("simulator_native_3dgs_runtime")
     if registration.get("status") != "registered" or registration.get("T_3dgs_world_to_sim_world") is None:
         milestone_blockers.append("background_unregistered")
     if sections.get("table_collision_projection", {}).get("status") != "passed":
@@ -463,6 +547,14 @@ def _first_existing(run: Path, candidates: list[str]) -> str | None:
         if (run / candidate).is_file():
             return candidate
     return None
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result
 
 
 def _load_json(path: Path) -> dict[str, Any]:
