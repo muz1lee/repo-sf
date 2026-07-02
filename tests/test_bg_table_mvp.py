@@ -498,6 +498,68 @@ def test_export_phone_bg_table_mvp_writes_formal_manifest_and_honest_claims(tmp_
     assert "simulator_native_3dgs_runtime" in qa["claim_gate"]["remaining_gaps"]
 
 
+def test_phone_bg_table_strict_qa_accepts_partial_3dgs_overlay_when_table_and_runtime_pass(tmp_path):
+    run = tmp_path / "run"
+    _write_bg_table_run(run)
+    polygon_path = run / "background" / "table_polygon_world.json"
+    polygon = json.loads(polygon_path.read_text(encoding="utf-8"))
+    polygon["source_backend"] = "semantic_multiframe_arkit_depth_ransac_plane"
+    polygon["geometry_type"] = "clipped-convex-hull_from_multiframe_semantic_masked_depth_plane"
+    polygon_path.write_text(json.dumps(polygon), encoding="utf-8")
+    main(["build-table-collision", "--run-dir", str(run), "--source", "background/table_polygon_world.json", "--write"])
+    main(["qa-bg-table", "--run-dir", str(run), "--frames", "0", "--write-overlays"])
+    bg_table = json.loads((run / "qa" / "bg_table_report.json").read_text(encoding="utf-8"))
+    bg_table["status"] = "partial"
+    bg_table["blocking_reasons"] = ["registered_3dgs_overlay_not_rendered"]
+    bg_table["hard_blocking_reasons"] = []
+    bg_table["partial_blocking_reasons"] = ["registered_3dgs_overlay_not_rendered"]
+    bg_table["3dgs_overlay"] = {
+        "status": "blocked",
+        "runtime": "external-3dgs-renderer",
+        "blocking_reason": "missing_3dgs_config_file",
+        "live_3dgs_runtime": False,
+        "simulator_native": False,
+    }
+    (run / "qa" / "bg_table_report.json").write_text(json.dumps(bg_table), encoding="utf-8")
+    export_phone_bg_table_mvp(run)
+    (run / "qa" / "table_physics_mvp_runtime_report.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "status": "completed",
+                "stability_status": "passed",
+                "settle_steps": 160,
+                "test_object": {
+                    "object_id": "table_mvp_cube",
+                    "shape": "cube",
+                    "size_m": 0.08,
+                    "initial_center_world_m": [0.0, 0.0, 1.16],
+                    "final_center_world_m": [0.0, 0.0, 1.04],
+                    "expected_resting_center_z_m": 1.04,
+                    "bottom_z_m": 1.0,
+                    "contact_gap_m": 0.0,
+                    "horizontal_drift_m": 0.0,
+                },
+                "checks": {
+                    "contact_ok": True,
+                    "horizontal_drift_ok": True,
+                    "nan_detected": False,
+                    "fall_below_table": False,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    qa = write_sim_export_report(run, strict_claims=True).report
+
+    assert qa["sections"]["table_collision_projection"]["status"] == "passed"
+    assert qa["sections"]["physics_settle"]["status"] == "passed"
+    assert qa["claim_gate"]["engineering_interactive_scene_status"] == "passed"
+    assert qa["claim_gate"]["simfoundry_upper_reproduction_status"] == "partial"
+    assert "registered_3dgs_overlay_not_rendered" in qa["claim_gate"]["remaining_gaps"]
+
+
 def test_qa_bg_table_blocks_when_table_polygon_projection_overreaches_visible_mask(tmp_path):
     run = tmp_path / "run"
     _write_bg_table_run(run)

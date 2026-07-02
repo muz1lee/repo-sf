@@ -123,8 +123,16 @@ def _write_phone_bg_table_projection_qa(run: Path, *, strict_claims: bool = Fals
     visible_iou = _float_or_none(table.get("visible_iou") or projection_iou)
     overreach_ratio = _float_or_none(table.get("overreach_ratio") or table.get("raw_overreach_ratio"))
     undercoverage_ratio = _float_or_none(table.get("undercoverage_ratio"))
-    reasons = [str(item) for item in bg_report.get("blocking_reasons", [])]
-    if bg_report.get("status") != "passed":
+    hard_reasons = [str(item) for item in bg_report.get("hard_blocking_reasons", [])]
+    partial_reasons = [str(item) for item in bg_report.get("partial_blocking_reasons", [])]
+    if not hard_reasons and not partial_reasons:
+        raw_reasons = [str(item) for item in bg_report.get("blocking_reasons", [])]
+        if bg_report.get("status") == "partial":
+            partial_reasons = raw_reasons
+        else:
+            hard_reasons = raw_reasons
+    reasons = list(hard_reasons)
+    if bg_report.get("status") not in {"passed", "partial"}:
         reasons.append("bg_table_qa_not_passed")
     if not table:
         reasons.append("phone_table_collision_metrics_missing")
@@ -140,6 +148,7 @@ def _write_phone_bg_table_projection_qa(run: Path, *, strict_claims: bool = Fals
         "version": 1,
         "status": "passed" if not base_reasons else "blocked",
         "blocking_reasons": base_reasons,
+        "partial_blocking_reasons": _dedupe(partial_reasons),
         "source_backend": table.get("source_backend") or support.get("table_collision_source_backend"),
         "geometry_type": support.get("table_collision_geometry_type") or "polygon_slab",
         "derived_from_tabletop_mask": True,
@@ -302,6 +311,35 @@ def _table_collision_projection_section(run: Path, manifest: dict[str, Any], *, 
 
 
 def _physics_settle_section(run: Path) -> dict[str, Any]:
+    phone_runtime_path = run / "qa" / "table_physics_mvp_runtime_report.json"
+    if phone_runtime_path.is_file():
+        report = json.loads(phone_runtime_path.read_text(encoding="utf-8"))
+        checks = report.get("checks") if isinstance(report.get("checks"), dict) else {}
+        reasons = []
+        if report.get("status") != "completed":
+            reasons.append("genesis_settle_not_completed")
+        if report.get("stability_status") != "passed":
+            reasons.append("genesis_settle_failed")
+        if checks.get("nan_detected"):
+            reasons.append("genesis_settle_nan_detected")
+        if checks.get("fall_below_table"):
+            reasons.append("genesis_settle_fall_below_support")
+        if checks.get("contact_ok") is False:
+            reasons.append("genesis_settle_contact_gap_too_large")
+        if checks.get("horizontal_drift_ok") is False:
+            reasons.append("genesis_settle_excessive_displacement")
+        test_object = report.get("test_object") if isinstance(report.get("test_object"), dict) else {}
+        return {
+            "status": "passed" if not reasons else "blocked",
+            "blocking_reasons": _dedupe(reasons),
+            "report_path": "qa/table_physics_mvp_runtime_report.json",
+            "stability_status": report.get("stability_status"),
+            "settle_steps": report.get("settle_steps"),
+            "contact_gap_m": test_object.get("contact_gap_m"),
+            "horizontal_drift_m": test_object.get("horizontal_drift_m"),
+            "fall_below_support_detected": checks.get("fall_below_table"),
+            "excessive_displacement_detected": checks.get("horizontal_drift_ok") is False,
+        }
     path = run / "qa" / "genesis_settle_report.json"
     if not path.is_file():
         return {"status": "blocked", "blocking_reasons": ["physics_settle_missing"], "report_path": None}
@@ -429,6 +467,12 @@ def _honest_claim_gate(
         remaining_gaps.append("external_3dgs_render_sidecar")
     if visual.get("has_3dgs_sidecar") and visual.get("simulator_native") is not True:
         remaining_gaps.append("simulator_native_3dgs_runtime")
+    bg_table = _load_json(run / "qa" / "bg_table_report.json")
+    bg_table_partial = [str(item) for item in bg_table.get("partial_blocking_reasons", [])]
+    if not bg_table_partial and bg_table.get("status") == "partial":
+        bg_table_partial = [str(item) for item in bg_table.get("blocking_reasons", [])]
+    if "registered_3dgs_overlay_not_rendered" in bg_table_partial:
+        remaining_gaps.append("registered_3dgs_overlay_not_rendered")
     if registration.get("status") != "registered" or registration.get("T_3dgs_world_to_sim_world") is None:
         milestone_blockers.append("background_unregistered")
     if sections.get("table_collision_projection", {}).get("status") != "passed":
