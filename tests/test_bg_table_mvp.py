@@ -276,6 +276,28 @@ def test_qa_bg_table_applies_nerfstudio_gaussian_asset_axis_bridge_for_center_di
     assert diagnostic["transform_source"] == "diagnostic_splat_asset_to_sim_world"
 
 
+def test_qa_bg_table_is_partial_when_splat_centers_do_not_overlap_table_polygon(tmp_path):
+    run = tmp_path / "run"
+    _write_bg_table_run(run)
+    _write_ascii_splat(
+        run / "background" / "3dgs_native" / "splat_rgb.ply",
+        [(0.6, 0.6, 1.0), (0.7, 0.6, 1.0), (0.6, 0.7, 1.0), (0.8, 0.8, 1.0)],
+    )
+    main(["build-table-collision", "--run-dir", str(run), "--source", "background/table_polygon_world.json", "--write"])
+
+    code = main(["qa-bg-table", "--run-dir", str(run), "--frames", "0", "--write-overlays"])
+
+    assert code == 0
+    report = json.loads((run / "qa" / "bg_table_report.json").read_text(encoding="utf-8"))
+    assert report["status"] == "partial"
+    assert "splat_center_table_alignment_below_threshold" in report["blocking_reasons"]
+    assert report["claim"] is None
+    diagnostic = report["splat_center_diagnostic"]
+    assert diagnostic["alignment_status"] == "misregistered"
+    assert diagnostic["near_plane_inside_polygon_ratio"] == pytest.approx(0.0)
+    assert diagnostic["min_near_plane_inside_polygon_ratio"] == pytest.approx(0.25)
+
+
 def test_qa_bg_table_blocks_when_registered_transform_is_missing(tmp_path):
     run = tmp_path / "run"
     _write_bg_table_run(run)

@@ -31,6 +31,7 @@ MAX_OVERREACH_RATIO = 0.15
 MAX_UNDERCOVERAGE_RATIO = 0.20
 MAX_DEPTH_PLANE_MEDIAN_ABS_RESIDUAL_M = 0.02
 MAX_DEPTH_PLANE_P90_ABS_RESIDUAL_M = 0.05
+MIN_SPLAT_CENTER_TABLE_INSIDE_RATIO = 0.25
 DEFAULT_SLAB_THICKNESS_M = 0.03
 DEFAULT_PLANE_DISTANCE_THRESHOLD_M = 0.02
 ARKIT_TO_SIM_BRIDGE_SOURCE = "phone_sim_alignment_arkit_to_sim_world"
@@ -841,6 +842,11 @@ def qa_bg_table(
         else []
     )
     splat_diag = _splat_center_diagnostic(run, polygon, t_3dgs_to_sim)
+    splat_alignment_status = splat_diag.get("alignment_status")
+    if splat_alignment_status == "misregistered":
+        partial_reasons.append("splat_center_table_alignment_below_threshold")
+    elif splat_alignment_status in {"unavailable", "no_near_plane_splats"}:
+        partial_reasons.append("splat_center_table_alignment_unavailable")
 
     if projection.get("tabletop_iou") is None or projection["tabletop_iou"] < TABLETOP_IOU_THRESHOLD:
         hard_reasons.append("tabletop_iou_below_threshold")
@@ -1446,7 +1452,9 @@ def _splat_center_diagnostic(run: Path, polygon: dict[str, Any], t_3dgs_world_to
     if centers.size == 0 or t_3dgs_world_to_sim is None:
         return {
             "status": "unavailable",
+            "alignment_status": "unavailable",
             "near_plane_inside_polygon_ratio": None,
+            "min_near_plane_inside_polygon_ratio": MIN_SPLAT_CENTER_TABLE_INSIDE_RATIO,
             "asset_axis_bridge": bridge_report,
             "collision_geometry_source": "not_used",
         }
@@ -1458,7 +1466,9 @@ def _splat_center_diagnostic(run: Path, polygon: dict[str, Any], t_3dgs_world_to
     if near_count == 0:
         return {
             "status": "no_near_plane_splats",
+            "alignment_status": "no_near_plane_splats",
             "near_plane_inside_polygon_ratio": None,
+            "min_near_plane_inside_polygon_ratio": MIN_SPLAT_CENTER_TABLE_INSIDE_RATIO,
             "near_plane_count": 0,
             "asset_axis_bridge": bridge_report,
             "T_splat_asset_to_sim_world": diagnostic_transform.tolist(),
@@ -1467,12 +1477,17 @@ def _splat_center_diagnostic(run: Path, polygon: dict[str, Any], t_3dgs_world_to
         }
     inside = _points_inside_any_polygon(centers_sim[near, :2], _polygon_xy_sets(polygon))
     inside_count = int(np.count_nonzero(inside))
+    inside_ratio = float(inside_count / near_count)
+    alignment_status = "aligned" if inside_ratio >= MIN_SPLAT_CENTER_TABLE_INSIDE_RATIO else "misregistered"
     return {
         "status": "computed",
+        "alignment_status": alignment_status,
         "near_plane_count": near_count,
         "near_plane_inside_polygon_count": inside_count,
-        "near_plane_inside_polygon_ratio": float(inside_count / near_count),
+        "near_plane_inside_polygon_ratio": inside_ratio,
+        "min_near_plane_inside_polygon_ratio": MIN_SPLAT_CENTER_TABLE_INSIDE_RATIO,
         "near_plane_threshold_m": 0.05,
+        "diagnostic_warning": None if alignment_status == "aligned" else "3dgs_splat_centers_do_not_overlap_table_polygon",
         "asset_axis_bridge": bridge_report,
         "T_splat_asset_to_sim_world": diagnostic_transform.tolist(),
         "transform_source": _splat_diagnostic_transform_source(asset_bridge),
