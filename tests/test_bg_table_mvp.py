@@ -6,6 +6,7 @@ import pytest
 import trimesh
 from PIL import Image
 
+from real2sim_scene_foundry.bg_table_sim import export_bg_table_physics_smoke
 from real2sim_scene_foundry.cli import main
 
 
@@ -338,6 +339,60 @@ def test_qa_bg_table_blocks_when_registered_transform_is_missing(tmp_path):
     assert report["status"] == "blocked"
     assert "missing_T_3dgs_world_to_sim_world" in report["blocking_reasons"]
     assert report["claim"] is None
+
+
+def test_export_bg_table_physics_smoke_writes_genesis_usd_and_contact_contract(tmp_path):
+    run = tmp_path / "run"
+    _write_bg_table_run(run)
+    main(["build-table-collision", "--run-dir", str(run), "--source", "background/table_polygon_world.json", "--write"])
+    main(["qa-bg-table", "--run-dir", str(run), "--frames", "0", "--write-overlays"])
+
+    result = export_bg_table_physics_smoke(run, cube_size_m=0.08, drop_height_m=0.12, settle_steps=64)
+
+    assert result.report["status"] == "script_written"
+    assert result.report["scope"] == "bg_table_physics_smoke"
+    assert result.report["support_surface"]["mesh_path"] == "table/collision_polygon_slab.glb"
+    assert result.report["support_surface"]["source_backend"] == "arkit_depth_ransac_plane"
+    assert result.report["test_object"]["shape"] == "cube"
+    assert result.report["test_object"]["size_m"] == pytest.approx(0.08)
+    assert result.report["test_object"]["expected_resting_center_z_m"] == pytest.approx(1.04)
+    assert result.report["physics_contract"]["expected_contact_gap_abs_m_max"] == pytest.approx(0.03)
+    assert result.report["background_visual"]["mode"] == "registered_3dgs_visual_only"
+    assert result.report["background_visual"]["simulator_native_3dgs"] is False
+    assert result.report["background_visual"]["physics_role"] == "none"
+    assert result.config_path == run / "exports" / "bg_table_physics_smoke_config.json"
+    assert result.genesis_script_path == run / "exports" / "bg_table_physics_smoke_genesis.py"
+    assert result.usd_path == run / "exports" / "bg_table_physics_smoke.usda"
+    assert result.cube_visual_path == run / "exports" / "bg_table_physics_smoke_assets" / "test_cube.glb"
+    assert result.report_path == run / "qa" / "table_physics_smoke_report.json"
+    assert result.config_path.is_file()
+    assert result.genesis_script_path.is_file()
+    assert result.usd_path.is_file()
+    assert result.cube_visual_path.is_file()
+    script = result.genesis_script_path.read_text(encoding="utf-8")
+    compile(script, str(result.genesis_script_path), "exec")
+    assert "gs.morphs.Mesh" in script
+    assert "gs.morphs.Box" in script
+    assert "table_physics_smoke_runtime_report.json" in script
+    usd = result.usd_path.read_text(encoding="utf-8")
+    assert 'def Xform "SupportSurface"' in usd
+    assert 'prepend references = @../table/collision_polygon_slab.glb@' in usd
+    assert 'def Cube "TestCube"' in usd
+    assert 'custom string rsf:background_visual_role = "visual_only_not_physics"' in usd
+
+
+def test_cli_export_bg_table_sim_smoke_writes_report(tmp_path):
+    run = tmp_path / "run"
+    _write_bg_table_run(run)
+    main(["build-table-collision", "--run-dir", str(run), "--source", "background/table_polygon_world.json", "--write"])
+
+    code = main(["export-bg-table-sim-smoke", "--run-dir", str(run), "--cube-size-m", "0.06", "--drop-height-m", "0.10"])
+
+    assert code == 0
+    report = json.loads((run / "qa" / "table_physics_smoke_report.json").read_text(encoding="utf-8"))
+    assert report["status"] == "script_written"
+    assert report["test_object"]["size_m"] == pytest.approx(0.06)
+    assert report["run_command"].endswith("--no-viewer")
 
 
 def test_qa_bg_table_blocks_when_table_polygon_projection_overreaches_visible_mask(tmp_path):
