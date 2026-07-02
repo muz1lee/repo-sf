@@ -113,6 +113,28 @@ def test_import_phone_capture_writes_explicit_camera_and_trajectory(tmp_path):
     assert (run / "capture_contract.json").is_file()
 
 
+def test_import_phone_capture_preserves_depth_camera_to_pose_camera_bridge(tmp_path):
+    capture = tmp_path / "capture"
+    run = tmp_path / "run"
+    _write_phone_bundle(capture)
+    poses_path = capture / "camera" / "poses.json"
+    poses = json.loads(poses_path.read_text(encoding="utf-8"))
+    poses["depth_camera_to_pose_camera_bridge"] = "opencv_to_arkit_camera"
+    poses["depth_camera_convention"] = "opencv_x_right_y_down_z_forward"
+    poses["pose_camera_convention"] = "arkit_x_right_y_up_z_backward"
+    poses_path.write_text(json.dumps(poses), encoding="utf-8")
+
+    result = import_phone_capture(capture, run)
+
+    camera = json.loads((run / "camera.json").read_text(encoding="utf-8"))
+    trajectory = json.loads((run / "trajectory.json").read_text(encoding="utf-8"))
+    assert result["status"] == "imported"
+    assert camera["depth_camera_to_pose_camera_bridge"] == "opencv_to_arkit_camera"
+    assert trajectory["depth_camera_to_pose_camera_bridge"] == "opencv_to_arkit_camera"
+    assert camera["depth_camera_convention"] == "opencv_x_right_y_down_z_forward"
+    assert camera["pose_camera_convention"] == "arkit_x_right_y_up_z_backward"
+
+
 def test_export_nerfstudio_from_phone_capture_blocks_sim_world_without_alignment(tmp_path):
     capture = tmp_path / "capture"
     run = tmp_path / "run"

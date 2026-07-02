@@ -107,6 +107,9 @@ def convert_record3d_export(
         "coordinate_frame": "arkit_world",
         "pose_source": "record3d_metadata_poses",
         "pose_format": "quaternion_xyzw_translation_xyz_to_camera_to_world",
+        "depth_camera_to_pose_camera_bridge": "opencv_to_arkit_camera",
+        "depth_camera_convention": "opencv_x_right_y_down_z_forward",
+        "pose_camera_convention": "arkit_x_right_y_up_z_backward",
         "poses": poses,
     }
     (camera_dir / "poses.json").write_text(json.dumps(poses_doc, indent=2), encoding="utf-8")
@@ -118,6 +121,9 @@ def convert_record3d_export(
         "depth_unit": "meter",
         "depth_source": "record3d_exr_channel",
         "depth_channel": int(depth_channel),
+        "depth_camera_to_pose_camera_bridge": "opencv_to_arkit_camera",
+        "depth_camera_convention": "opencv_x_right_y_down_z_forward",
+        "pose_camera_convention": "arkit_x_right_y_up_z_backward",
         "confidence_source": "depth_validity_derived",
         "confidence_coverage_mean": float(np.mean(confidence_coverages)),
         "original_frame_count": int(len(metadata.get("poses", []))),

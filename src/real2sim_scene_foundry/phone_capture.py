@@ -118,6 +118,7 @@ def import_phone_capture(capture_dir: str | Path, run_dir: str | Path) -> dict[s
         (run / dirname).mkdir(parents=True, exist_ok=True)
     intrinsics = _load_json(capture / "camera" / "intrinsics.json")
     poses_doc = _load_json(capture / "camera" / "poses.json")
+    metadata = _load_json(capture / "metadata.json")
     poses = _pose_entries(poses_doc)
     frames = []
     for pose in poses:
@@ -160,6 +161,9 @@ def import_phone_capture(capture_dir: str | Path, run_dir: str | Path) -> dict[s
         "depth_unit": "meter",
         "pose_frame_id": frames[0]["frame_id"],
     }
+    bridge = _depth_camera_bridge_metadata(poses_doc, metadata)
+    if bridge:
+        camera.update(bridge)
     trajectory = {
         "version": 1,
         "source": "phone_capture_bundle",
@@ -169,6 +173,8 @@ def import_phone_capture(capture_dir: str | Path, run_dir: str | Path) -> dict[s
         "scale_source": "arkit_sceneDepth_meters",
         "frames": frames,
     }
+    if bridge:
+        trajectory.update(bridge)
     (run / "camera.json").write_text(json.dumps(camera, indent=2), encoding="utf-8")
     (run / "trajectory.json").write_text(json.dumps(trajectory, indent=2), encoding="utf-8")
     (run / "capture_contract.json").write_text(json.dumps(contract, indent=2), encoding="utf-8")
@@ -267,6 +273,25 @@ def _validation_report(capture: Path, reasons: list[str], **kwargs: Any) -> dict
         "extrinsics_source": "arkit_explicit" if not reasons or "poses_missing_or_empty" not in reasons else "missing",
         "scale_source": "arkit_sceneDepth_meters" if "depth_unit_not_meter" not in reasons else "unknown",
         **kwargs,
+    }
+
+
+def _depth_camera_bridge_metadata(poses_doc: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
+    bridge = poses_doc.get("depth_camera_to_pose_camera_bridge") or metadata.get("depth_camera_to_pose_camera_bridge")
+    if not bridge:
+        return {}
+    return {
+        "depth_camera_to_pose_camera_bridge": str(bridge),
+        "depth_camera_convention": str(
+            poses_doc.get("depth_camera_convention")
+            or metadata.get("depth_camera_convention")
+            or "opencv_x_right_y_down_z_forward"
+        ),
+        "pose_camera_convention": str(
+            poses_doc.get("pose_camera_convention")
+            or metadata.get("pose_camera_convention")
+            or "arkit_x_right_y_up_z_backward"
+        ),
     }
 
 

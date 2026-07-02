@@ -15,6 +15,7 @@ DEFAULT_PLANE_DISTANCE_THRESHOLD_M = 0.02
 DEFAULT_MAX_FRAMES = 8
 DEFAULT_MAX_POINTS_PER_FRAME = 5000
 MIN_PLANE_INLIERS = 128
+OPENCV_TO_ARKIT_CAMERA_BRIDGE = np.diag([1.0, -1.0, -1.0, 1.0])
 
 
 def align_phone_sim_world(
@@ -57,6 +58,7 @@ def align_phone_sim_world(
         report = _blocked_report(run, ["camera_intrinsics_invalid"])
         report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
         return report
+    camera_bridge_name, camera_bridge = _depth_camera_to_pose_camera_bridge(run, camera, trajectory)
 
     rng = np.random.default_rng(13)
     point_batches = []
@@ -66,7 +68,7 @@ def align_phone_sim_world(
         if transform is None:
             continue
         camera_centers.append(transform[:3, 3])
-        points = _points_from_frame(run, frame, k, transform, max_points=max_points_per_frame, rng=rng)
+        points = _points_from_frame(run, frame, k, transform, camera_bridge=camera_bridge, max_points=max_points_per_frame, rng=rng)
         if points.size:
             point_batches.append(points)
     if not point_batches:
@@ -105,6 +107,7 @@ def align_phone_sim_world(
         selected_frames[0],
         k,
         transform_arkit_to_sim,
+        camera_bridge=camera_bridge,
         plane_distance_threshold_m=float(plane_distance_threshold_m),
     )
     Image.fromarray(first_frame_mask.astype(np.uint8) * 255).save(background_dir / "tabletop_mask.png")
@@ -159,6 +162,8 @@ def align_phone_sim_world(
             "plane_distance_threshold_m": float(plane_distance_threshold_m),
             "frame_count_used": int(len(selected_frames)),
         },
+        "depth_camera_to_pose_camera_bridge": camera_bridge_name,
+        "depth_camera_to_pose_camera_bridge_matrix": camera_bridge.tolist(),
         "artifacts": {
             "camera_arkit_backup": "camera.arkit.json",
             "trajectory_arkit_backup": "trajectory.arkit.json",
@@ -233,6 +238,7 @@ def _points_from_frame(
     k: np.ndarray,
     t_camera_to_world: np.ndarray,
     *,
+    camera_bridge: np.ndarray,
     max_points: int,
     rng: np.random.Generator,
 ) -> np.ndarray:
@@ -248,7 +254,7 @@ def _points_from_frame(
         choice = rng.choice(rows.size, size=int(max_points), replace=False)
         rows = rows[choice]
         cols = cols[choice]
-    return _backproject_pixels(depth, rows, cols, k, t_camera_to_world)
+    return _backproject_pixels(depth, rows, cols, k, t_camera_to_world, camera_bridge=camera_bridge)
 
 
 def _backproject_pixels(
@@ -257,11 +263,13 @@ def _backproject_pixels(
     cols: np.ndarray,
     k: np.ndarray,
     t_camera_to_world: np.ndarray,
+    *,
+    camera_bridge: np.ndarray,
 ) -> np.ndarray:
     z = depth[rows, cols].astype(np.float64)
     x = (cols.astype(np.float64) - float(k[0, 2])) * z / float(k[0, 0])
     y = (rows.astype(np.float64) - float(k[1, 2])) * z / float(k[1, 1])
-    points_camera = np.column_stack([x, y, z, np.ones_like(z)])
+    points_camera = (camera_bridge @ np.column_stack([x, y, z, np.ones_like(z)]).T).T
     points_world = (t_camera_to_world @ points_camera.T).T[:, :3]
     finite = np.all(np.isfinite(points_world), axis=1)
     return points_world[finite]
@@ -337,6 +345,7 @@ def _first_frame_plane_mask(
     k: np.ndarray,
     t_arkit_to_sim: np.ndarray,
     *,
+    camera_bridge: np.ndarray,
     plane_distance_threshold_m: float,
 ) -> tuple[np.ndarray, np.ndarray]:
     t_camera_to_world = _transform(frame.get("T_camera_to_world"))
@@ -348,7 +357,7 @@ def _first_frame_plane_mask(
     rows, cols = np.where(valid)
     if rows.size == 0:
         return np.zeros(depth.shape, dtype=bool), np.zeros((0, 3), dtype=np.float64)
-    points_world = _backproject_pixels(depth, rows, cols, k, t_camera_to_world)
+    points_world = _backproject_pixels(depth, rows, cols, k, t_camera_to_world, camera_bridge=camera_bridge)
     points_sim = _transform_points(t_arkit_to_sim, points_world)
     near = np.abs(points_sim[:, 2]) <= float(plane_distance_threshold_m)
     mask = np.zeros(depth.shape, dtype=bool)
@@ -392,6 +401,22 @@ def _rewrite_poses_to_sim(
     sim_trajectory["phone_sim_alignment_path"] = str(report_path.relative_to(report_path.parents[1]))
     sim_trajectory["T_arkit_world_to_sim_world"] = t_arkit_to_sim.tolist()
     return sim_camera, sim_trajectory
+
+
+def _depth_camera_to_pose_camera_bridge(
+    run: Path,
+    camera: dict[str, Any],
+    trajectory: dict[str, Any],
+) -> tuple[str | None, np.ndarray]:
+    metadata = _load_json(run / "capture_contract.json").get("metadata", {})
+    bridge_name = (
+        camera.get("depth_camera_to_pose_camera_bridge")
+        or trajectory.get("depth_camera_to_pose_camera_bridge")
+        or metadata.get("depth_camera_to_pose_camera_bridge")
+    )
+    if bridge_name == "opencv_to_arkit_camera" or metadata.get("source_format") == "record3d_exr_jpg_sequence":
+        return "opencv_to_arkit_camera", OPENCV_TO_ARKIT_CAMERA_BRIDGE.copy()
+    return None, np.eye(4, dtype=np.float64)
 
 
 def _write_original_pose_backups(run: Path, camera: dict[str, Any], trajectory: dict[str, Any]) -> None:

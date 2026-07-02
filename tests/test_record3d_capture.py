@@ -72,8 +72,10 @@ def test_convert_record3d_export_writes_valid_phone_capture_bundle(tmp_path):
     metadata = json.loads((bundle / "metadata.json").read_text(encoding="utf-8"))
     assert metadata["source_format"] == "record3d_exr_jpg_sequence"
     assert metadata["confidence_source"] == "depth_validity_derived"
+    assert metadata["depth_camera_to_pose_camera_bridge"] == "opencv_to_arkit_camera"
     poses = json.loads((bundle / "camera" / "poses.json").read_text(encoding="utf-8"))
     assert poses["coordinate_frame"] == "arkit_world"
+    assert poses["depth_camera_to_pose_camera_bridge"] == "opencv_to_arkit_camera"
     assert poses["poses"][2]["T_camera_to_world"][0][3] == 0.12
 
 

@@ -13,6 +13,14 @@ def _identity4():
     return [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
 
 
+def _translate4(x: float, y: float, z: float):
+    matrix = _identity4()
+    matrix[0][3] = x
+    matrix[1][3] = y
+    matrix[2][3] = z
+    return matrix
+
+
 def _write_ascii_splat(path: Path, points: list[tuple[float, float, float]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     header = [
@@ -429,6 +437,175 @@ def test_fit_tabletop_from_semantic_mask_writes_masked_depth_polygon_and_refined
     assert polygon["top_z_m"] == pytest.approx(1.0)
     assert polygon["unit"] == "meter"
     assert len(polygon["polygon_world_xy"]) >= 3
+
+
+def test_fit_tabletop_multiframe_fuses_semantic_depth_from_multiple_poses(tmp_path):
+    run = tmp_path / "run"
+    _write_bg_table_run(run)
+    masks_dir = run / "background" / "tabletop_semantic_masks"
+    masks_dir.mkdir()
+    confidence_dir = run / "confidence"
+    confidence_dir.mkdir()
+    semantic = np.zeros((100, 100), dtype=np.uint8)
+    semantic[30:71, 30:71] = 255
+    Image.fromarray(semantic).save(masks_dir / "frame_000000.png")
+    Image.fromarray(semantic).save(masks_dir / "frame_000020.png")
+    Image.fromarray(np.full((100, 100), 255, dtype=np.uint8)).save(confidence_dir / "frame_000000.png")
+    Image.fromarray(np.full((100, 100), 255, dtype=np.uint8)).save(confidence_dir / "frame_000020.png")
+    np.save(run / "depth" / "frame_000020.npy", np.ones((100, 100), dtype=np.float32))
+    Image.new("RGB", (100, 100), color=(18, 22, 26)).save(run / "frames" / "frame_000020.jpg")
+    trajectory = json.loads((run / "trajectory.json").read_text(encoding="utf-8"))
+    trajectory["frames"][0]["confidence_path"] = "confidence/frame_000000.png"
+    trajectory["frames"].append(
+        {
+            "frame_id": "frame_000020",
+            "rgb_path": "frames/frame_000020.jpg",
+            "depth_path": "depth/frame_000020.npy",
+            "confidence_path": "confidence/frame_000020.png",
+            "T_camera_to_world": _translate4(0.08, 0.0, 0.0),
+        }
+    )
+    (run / "trajectory.json").write_text(json.dumps(trajectory), encoding="utf-8")
+    (run / "background" / "table_polygon_world.json").unlink()
+    (run / "background" / "tabletop_mask.png").unlink()
+
+    code = main(
+        [
+            "fit-tabletop-multiframe",
+            "--run-dir",
+            str(run),
+            "--masks",
+            "background/tabletop_semantic_masks",
+            "--frames",
+            "0,20",
+            "--hull",
+            "convex-hull",
+            "--boundary-mode",
+            "union-hull",
+            "--write",
+        ]
+    )
+
+    assert code == 0
+    report = json.loads((run / "qa" / "table_multiframe_report.json").read_text(encoding="utf-8"))
+    plane = json.loads((run / "background" / "table_plane_multiframe.json").read_text(encoding="utf-8"))
+    polygon = json.loads((run / "background" / "table_polygon_world.json").read_text(encoding="utf-8"))
+    assert report["status"] == "passed"
+    assert report["source_backend"] == "semantic_multiframe_arkit_depth_ransac_plane"
+    assert report["metrics"]["used_frame_count"] == 2
+    assert report["metrics"]["trajectory_baseline_m"] == pytest.approx(0.08)
+    assert report["metrics"]["plane_inlier_count"] > 0
+    assert report["artifacts"]["fused_points_path"] == "background/fused_tabletop_points.ply"
+    assert plane["status"] == "passed"
+    assert plane["source_backend"] == "semantic_multiframe_arkit_depth_ransac_plane"
+    assert polygon["source_backend"] == "semantic_multiframe_arkit_depth_ransac_plane"
+    assert polygon["source_frame_count"] == 2
+    assert polygon["semantic_mask_collection_path"] == "background/tabletop_semantic_masks"
+    assert polygon["top_z_m"] == pytest.approx(1.0)
+    assert polygon["polygon_extent_x_m"] > 0.45
+    assert (run / "background" / "fused_tabletop_points.ply").is_file()
+    assert (run / "background" / "tabletop_semantic_mask.png").is_file()
+    assert (run / "background" / "tabletop_mask.png").is_file()
+
+
+def test_fit_tabletop_multiframe_default_consensus_rejects_single_frame_planar_overreach(tmp_path):
+    run = tmp_path / "run"
+    _write_bg_table_run(run)
+    masks_dir = run / "background" / "tabletop_semantic_masks"
+    masks_dir.mkdir()
+    confidence_dir = run / "confidence"
+    confidence_dir.mkdir()
+    anchor = np.zeros((100, 100), dtype=np.uint8)
+    anchor[30:71, 30:71] = 255
+    overreaching = np.zeros((100, 100), dtype=np.uint8)
+    overreaching[10:91, 10:91] = 255
+    Image.fromarray(anchor).save(masks_dir / "frame_000000.png")
+    Image.fromarray(overreaching).save(masks_dir / "frame_000020.png")
+    Image.fromarray(np.full((100, 100), 255, dtype=np.uint8)).save(confidence_dir / "frame_000000.png")
+    Image.fromarray(np.full((100, 100), 255, dtype=np.uint8)).save(confidence_dir / "frame_000020.png")
+    np.save(run / "depth" / "frame_000020.npy", np.ones((100, 100), dtype=np.float32))
+    Image.new("RGB", (100, 100), color=(18, 22, 26)).save(run / "frames" / "frame_000020.jpg")
+    trajectory = json.loads((run / "trajectory.json").read_text(encoding="utf-8"))
+    trajectory["frames"][0]["confidence_path"] = "confidence/frame_000000.png"
+    trajectory["frames"].append(
+        {
+            "frame_id": "frame_000020",
+            "rgb_path": "frames/frame_000020.jpg",
+            "depth_path": "depth/frame_000020.npy",
+            "confidence_path": "confidence/frame_000020.png",
+            "T_camera_to_world": _translate4(0.08, 0.0, 0.0),
+        }
+    )
+    (run / "trajectory.json").write_text(json.dumps(trajectory), encoding="utf-8")
+
+    code = main(
+        [
+            "fit-tabletop-multiframe",
+            "--run-dir",
+            str(run),
+            "--masks",
+            "background/tabletop_semantic_masks",
+            "--frames",
+            "0,20",
+            "--write",
+        ]
+    )
+
+    assert code == 0
+    report = json.loads((run / "qa" / "table_multiframe_report.json").read_text(encoding="utf-8"))
+    polygon = json.loads((run / "background" / "table_polygon_world.json").read_text(encoding="utf-8"))
+    assert report["status"] == "passed"
+    assert report["metrics"]["boundary_mode"] == "consensus-hull"
+    assert report["metrics"]["boundary_min_frame_support"] == 2
+    assert report["metrics"]["boundary_anchor_required"] is True
+    assert polygon["boundary_mode"] == "consensus-hull"
+    assert polygon["polygon_extent_x_m"] < 0.55
+    assert polygon["polygon_extent_y_m"] < 0.55
+
+
+def test_fit_tabletop_multiframe_blocks_when_only_one_frame_has_a_mask(tmp_path):
+    run = tmp_path / "run"
+    _write_bg_table_run(run)
+    masks_dir = run / "background" / "tabletop_semantic_masks"
+    masks_dir.mkdir()
+    confidence_dir = run / "confidence"
+    confidence_dir.mkdir()
+    semantic = np.zeros((100, 100), dtype=np.uint8)
+    semantic[30:71, 30:71] = 255
+    Image.fromarray(semantic).save(masks_dir / "frame_000000.png")
+    Image.fromarray(np.full((100, 100), 255, dtype=np.uint8)).save(confidence_dir / "frame_000000.png")
+    trajectory = json.loads((run / "trajectory.json").read_text(encoding="utf-8"))
+    trajectory["frames"][0]["confidence_path"] = "confidence/frame_000000.png"
+    trajectory["frames"].append(
+        {
+            "frame_id": "frame_000020",
+            "rgb_path": "frames/frame_000020.jpg",
+            "depth_path": "depth/frame_000020.npy",
+            "confidence_path": "confidence/frame_000020.png",
+            "T_camera_to_world": _translate4(0.08, 0.0, 0.0),
+        }
+    )
+    (run / "trajectory.json").write_text(json.dumps(trajectory), encoding="utf-8")
+
+    code = main(
+        [
+            "fit-tabletop-multiframe",
+            "--run-dir",
+            str(run),
+            "--masks",
+            "background/tabletop_semantic_masks",
+            "--frames",
+            "0,20",
+            "--write",
+        ]
+    )
+
+    assert code == 0
+    report = json.loads((run / "qa" / "table_multiframe_report.json").read_text(encoding="utf-8"))
+    assert report["status"] == "blocked"
+    assert report["metrics"]["used_frame_count"] == 1
+    assert "insufficient_multiframe_tabletop_frames" in report["blocking_reasons"]
+    assert report["artifacts"]["polygon_path"] is None
 
 
 def test_qa_bg_table_uses_semantic_mask_for_raw_projection_gate(tmp_path):

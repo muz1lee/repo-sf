@@ -19,7 +19,12 @@ from .table_collision_qa import _camera_matrix, _mask_iou, _project_vertices, _t
 SCOPE_NAME = "background_3dgs_and_table_collision_only"
 TABLE_COLLISION_SOURCE = "arkit_depth_ransac_plane"
 SEMANTIC_TABLE_COLLISION_SOURCE = "semantic_masked_arkit_depth_ransac_plane"
-ALLOWED_TABLE_COLLISION_SOURCES = {TABLE_COLLISION_SOURCE, SEMANTIC_TABLE_COLLISION_SOURCE}
+SEMANTIC_MULTI_TABLE_COLLISION_SOURCE = "semantic_multiframe_arkit_depth_ransac_plane"
+ALLOWED_TABLE_COLLISION_SOURCES = {
+    TABLE_COLLISION_SOURCE,
+    SEMANTIC_TABLE_COLLISION_SOURCE,
+    SEMANTIC_MULTI_TABLE_COLLISION_SOURCE,
+}
 TABLETOP_IOU_THRESHOLD = 0.65
 VISIBLE_IOU_THRESHOLD = 0.70
 MAX_OVERREACH_RATIO = 0.15
@@ -27,8 +32,10 @@ MAX_UNDERCOVERAGE_RATIO = 0.20
 MAX_DEPTH_PLANE_MEDIAN_ABS_RESIDUAL_M = 0.02
 MAX_DEPTH_PLANE_P90_ABS_RESIDUAL_M = 0.05
 DEFAULT_SLAB_THICKNESS_M = 0.03
+DEFAULT_PLANE_DISTANCE_THRESHOLD_M = 0.02
 ARKIT_TO_SIM_BRIDGE_SOURCE = "phone_sim_alignment_arkit_to_sim_world"
 NERFSTUDIO_GAUSSIAN_ASSET_AXIS_BRIDGE = np.diag([1.0, -1.0, -1.0, 1.0])
+OPENCV_TO_ARKIT_CAMERA_BRIDGE = np.diag([1.0, -1.0, -1.0, 1.0])
 
 
 @dataclass(frozen=True)
@@ -42,6 +49,17 @@ class TableCollisionBuildResult:
 @dataclass(frozen=True)
 class TabletopSemanticFitResult:
     polygon_path: Path
+    semantic_mask_path: Path
+    refined_mask_path: Path
+    report_path: Path
+    report: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class TabletopMultiframeFitResult:
+    polygon_path: Path
+    plane_path: Path
+    fused_points_path: Path
     semantic_mask_path: Path
     refined_mask_path: Path
     report_path: Path
@@ -162,7 +180,7 @@ def fit_tabletop_from_semantic_mask(
     mask: str | Path = "background/tabletop_semantic_mask.png",
     frame_index: int = 0,
     hull: str = "convex-hull",
-    plane_distance_threshold_m: float = DEFAULT_PLANE_DISTANCE_THRESHOLD_M if "DEFAULT_PLANE_DISTANCE_THRESHOLD_M" in globals() else 0.02,
+    plane_distance_threshold_m: float = DEFAULT_PLANE_DISTANCE_THRESHOLD_M,
     write: bool = False,
 ) -> TabletopSemanticFitResult:
     run = Path(run_dir)
@@ -192,6 +210,7 @@ def fit_tabletop_from_semantic_mask(
 
     frame = frames[0] if frames else {}
     t_camera_to_world = _transform(frame.get("T_camera_to_world")) if frame else None
+    camera_bridge_name, camera_bridge = _depth_camera_to_pose_camera_bridge(run, camera, trajectory)
     if t_camera_to_world is None:
         blocking_reasons.append("camera_extrinsics_missing")
     depth_path = run / str(frame.get("depth_path", "")) if frame else run / "<missing-depth>"
@@ -225,7 +244,7 @@ def fit_tabletop_from_semantic_mask(
 
     semantic_binary = semantic_mask > 0
     valid = semantic_binary & np.isfinite(depth) & (depth > 0.0) & (confidence > 0)
-    points_world, rows, cols = _backproject_selected_depth(depth, valid, k, t_camera_to_world)
+    points_world, rows, cols = _backproject_selected_depth(depth, valid, k, t_camera_to_world, camera_bridge=camera_bridge)
     if points_world.shape[0] < 3:
         report = _semantic_fit_blocked_report(run, ["insufficient_semantic_depth_points"], mask_src, frame_index, hull)
         report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
@@ -305,6 +324,7 @@ def fit_tabletop_from_semantic_mask(
             "plane_residual_median_m": float(np.median(inlier_residuals)),
             "plane_residual_p90_m": float(np.percentile(inlier_residuals, 90.0)),
             "top_z_m": top_z,
+            "depth_camera_to_pose_camera_bridge": camera_bridge_name,
         },
         "claim_boundary": {
             "semantic_tabletop_localization": "provided_by_mask_not_inferred_from_3dgs",
@@ -322,6 +342,389 @@ def fit_tabletop_from_semantic_mask(
         polygon_path.write_text(json.dumps(polygon, indent=2), encoding="utf-8")
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     return TabletopSemanticFitResult(polygon_path, semantic_mask_path, refined_mask_path, report_path, report)
+
+
+def fit_tabletop_multiframe_from_semantic_masks(
+    run_dir: str | Path,
+    *,
+    masks: str | Path = "background/tabletop_semantic_masks",
+    frames: str = "0,20,40,60",
+    hull: str = "convex-hull",
+    plane_distance_threshold_m: float = DEFAULT_PLANE_DISTANCE_THRESHOLD_M,
+    confidence_coverage_threshold: float = 0.30,
+    min_frame_count: int = 2,
+    min_baseline_m: float = 0.02,
+    max_points_per_frame: int = 50000,
+    boundary_mode: str = "consensus-hull",
+    boundary_min_frame_support: int = 2,
+    write: bool = False,
+) -> TabletopMultiframeFitResult:
+    run = Path(run_dir)
+    bg_dir = run / "background"
+    qa_dir = run / "qa"
+    bg_dir.mkdir(parents=True, exist_ok=True)
+    qa_dir.mkdir(parents=True, exist_ok=True)
+    report_path = qa_dir / "table_multiframe_report.json"
+    polygon_path = bg_dir / "table_polygon_world.json"
+    plane_path = bg_dir / "table_plane_multiframe.json"
+    fused_points_path = bg_dir / "fused_tabletop_points.ply"
+    semantic_mask_path = bg_dir / "tabletop_semantic_mask.png"
+    refined_mask_path = bg_dir / "tabletop_mask.png"
+
+    camera = _load_json(run / "camera.json")
+    trajectory = _load_json(run / "trajectory.json")
+    frame_indices = _parse_frame_indices(frames)
+    selected_frames = _select_trajectory_frames(trajectory, frame_indices)
+    k = _camera_matrix(camera)
+    camera_bridge_name, camera_bridge = _depth_camera_to_pose_camera_bridge(run, camera, trajectory)
+    blocking_reasons = _explicit_phone_camera_blocking_reasons(camera)
+    if k is None:
+        blocking_reasons.append("camera_intrinsics_missing")
+    if not selected_frames:
+        blocking_reasons.append("trajectory_frames_missing")
+    if hull not in {"convex-hull", "clipped-convex-hull", "rotated-rectangle"}:
+        blocking_reasons.append("unsupported_hull_method")
+    if boundary_mode not in {"union-hull", "consensus-hull"}:
+        blocking_reasons.append("unsupported_boundary_mode")
+    if blocking_reasons:
+        report = _multiframe_fit_blocked_report(
+            run,
+            reasons=blocking_reasons,
+            masks=masks,
+            frames_requested=frame_indices,
+            used_frames=[],
+            skipped_frames=[],
+            metrics={},
+        )
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        return TabletopMultiframeFitResult(
+            polygon_path, plane_path, fused_points_path, semantic_mask_path, refined_mask_path, report_path, report
+        )
+
+    assert k is not None
+    used_frames: list[dict[str, Any]] = []
+    skipped_frames: list[dict[str, Any]] = []
+    points_all: list[np.ndarray] = []
+    rows_all: list[np.ndarray] = []
+    cols_all: list[np.ndarray] = []
+    frame_numbers_all: list[np.ndarray] = []
+    camera_centers: list[np.ndarray] = []
+    anchor_mask: np.ndarray | None = None
+    anchor_mask_path: Path | None = None
+    anchor_shape: tuple[int, int] | None = None
+    anchor_frame_number: int | None = None
+
+    for frame in selected_frames:
+        frame_id = str(frame.get("frame_id") or "")
+        frame_number = _frame_number(frame_id)
+        skip_reasons: list[str] = []
+        mask_path = _resolve_multiframe_mask_path(run, masks, frame, frame_number)
+        if mask_path is None or not mask_path.is_file():
+            skip_reasons.append("tabletop_semantic_mask_missing")
+        depth_rel = frame.get("depth_path")
+        confidence_rel = frame.get("confidence_path")
+        t_camera_to_world = _transform(frame.get("T_camera_to_world"))
+        if not depth_rel:
+            skip_reasons.append("depth_frame_missing")
+        if not confidence_rel:
+            skip_reasons.append("confidence_frame_missing")
+        if t_camera_to_world is None:
+            skip_reasons.append("camera_extrinsics_missing")
+        depth_path = run / str(depth_rel) if depth_rel else None
+        confidence_path = run / str(confidence_rel) if confidence_rel else None
+        if depth_path is None or not depth_path.is_file():
+            skip_reasons.append("depth_frame_missing")
+        if confidence_path is None or not confidence_path.is_file():
+            skip_reasons.append("confidence_frame_missing")
+        if skip_reasons:
+            skipped_frames.append({"frame_index": frame_number, "frame_id": frame_id, "reasons": _dedupe(skip_reasons)})
+            continue
+
+        semantic = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+        depth = np.load(depth_path)
+        confidence = np.asarray(Image.open(confidence_path).convert("L"))
+        if semantic is None or depth.ndim != 2 or semantic.shape != depth.shape or confidence.shape != depth.shape:
+            reasons = []
+            if semantic is None:
+                reasons.append("tabletop_semantic_mask_unreadable")
+            if depth.ndim != 2:
+                reasons.append("depth_frame_not_2d")
+            if semantic is not None and semantic.shape != depth.shape:
+                reasons.append("semantic_mask_depth_shape_mismatch")
+            if confidence.shape != depth.shape:
+                reasons.append("confidence_depth_shape_mismatch")
+            skipped_frames.append({"frame_index": frame_number, "frame_id": frame_id, "reasons": reasons})
+            continue
+
+        semantic_binary = semantic > 0
+        semantic_area = int(np.count_nonzero(semantic_binary))
+        valid = semantic_binary & np.isfinite(depth) & (depth > 0.0) & (confidence > 0)
+        valid_count = int(np.count_nonzero(valid))
+        coverage = float(valid_count / max(1, semantic_area))
+        if semantic_area == 0:
+            skipped_frames.append({"frame_index": frame_number, "frame_id": frame_id, "reasons": ["tabletop_semantic_mask_empty"]})
+            continue
+        if coverage < float(confidence_coverage_threshold):
+            skipped_frames.append(
+                {
+                    "frame_index": frame_number,
+                    "frame_id": frame_id,
+                    "semantic_mask_path": _rel(run, mask_path),
+                    "confidence_coverage": coverage,
+                    "reasons": ["confidence_coverage_below_threshold"],
+                }
+            )
+            continue
+
+        points_world, rows, cols = _backproject_selected_depth(depth, valid, k, t_camera_to_world, camera_bridge=camera_bridge)
+        if points_world.shape[0] < 3:
+            skipped_frames.append({"frame_index": frame_number, "frame_id": frame_id, "reasons": ["insufficient_semantic_depth_points"]})
+            continue
+        points_world, rows, cols = _limit_frame_points(
+            points_world,
+            rows,
+            cols,
+            max_points=max_points_per_frame,
+            seed=frame_number + 1009,
+        )
+        points_all.append(points_world)
+        rows_all.append(rows)
+        cols_all.append(cols)
+        frame_numbers_all.append(np.full(points_world.shape[0], frame_number, dtype=np.int64))
+        camera_centers.append(t_camera_to_world[:3, 3].astype(np.float64))
+        if anchor_mask is None:
+            anchor_mask = semantic
+            anchor_mask_path = mask_path
+            anchor_shape = depth.shape
+            anchor_frame_number = frame_number
+        used_frames.append(
+            {
+                "frame_index": frame_number,
+                "frame_id": frame_id,
+                "semantic_mask_path": _rel(run, mask_path),
+                "depth_path": _rel(run, depth_path),
+                "confidence_path": _rel(run, confidence_path),
+                "semantic_mask_area_px": semantic_area,
+                "valid_depth_point_count": valid_count,
+                "sampled_point_count": int(points_world.shape[0]),
+                "confidence_coverage": coverage,
+            }
+        )
+
+    baseline = _trajectory_baseline(camera_centers)
+    metrics_base = {
+        "used_frame_count": len(used_frames),
+        "skipped_frame_count": len(skipped_frames),
+        "trajectory_baseline_m": baseline,
+        "min_frame_count": int(min_frame_count),
+        "min_baseline_m": float(min_baseline_m),
+        "confidence_coverage_threshold": float(confidence_coverage_threshold),
+        "boundary_mode": boundary_mode,
+        "boundary_min_frame_support": int(boundary_min_frame_support),
+        "depth_camera_to_pose_camera_bridge": camera_bridge_name,
+    }
+    hard_reasons: list[str] = []
+    if len(used_frames) < int(min_frame_count):
+        hard_reasons.append("insufficient_multiframe_tabletop_frames")
+    if baseline is None or baseline < float(min_baseline_m):
+        hard_reasons.append("trajectory_baseline_below_threshold")
+    if hard_reasons:
+        report = _multiframe_fit_blocked_report(
+            run,
+            reasons=hard_reasons,
+            masks=masks,
+            frames_requested=frame_indices,
+            used_frames=used_frames,
+            skipped_frames=skipped_frames,
+            metrics=metrics_base,
+        )
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        return TabletopMultiframeFitResult(
+            polygon_path, plane_path, fused_points_path, semantic_mask_path, refined_mask_path, report_path, report
+        )
+
+    points_world = np.concatenate(points_all, axis=0)
+    rows = np.concatenate(rows_all, axis=0)
+    cols = np.concatenate(cols_all, axis=0)
+    frame_numbers = np.concatenate(frame_numbers_all, axis=0)
+    plane = _fit_plane_ransac_points(points_world, distance_threshold_m=float(plane_distance_threshold_m))
+    if plane is None:
+        report = _multiframe_fit_blocked_report(
+            run,
+            reasons=["multiframe_depth_plane_ransac_failed"],
+            masks=masks,
+            frames_requested=frame_indices,
+            used_frames=used_frames,
+            skipped_frames=skipped_frames,
+            metrics=metrics_base,
+        )
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        return TabletopMultiframeFitResult(
+            polygon_path, plane_path, fused_points_path, semantic_mask_path, refined_mask_path, report_path, report
+        )
+
+    normal, offset, inliers = plane
+    near_points = points_world[inliers]
+    if near_points.shape[0] < 3:
+        report = _multiframe_fit_blocked_report(
+            run,
+            reasons=["insufficient_near_plane_multiframe_points"],
+            masks=masks,
+            frames_requested=frame_indices,
+            used_frames=used_frames,
+            skipped_frames=skipped_frames,
+            metrics=metrics_base,
+        )
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        return TabletopMultiframeFitResult(
+            polygon_path, plane_path, fused_points_path, semantic_mask_path, refined_mask_path, report_path, report
+        )
+
+    near_frame_numbers = frame_numbers[inliers]
+    boundary_points, boundary_keep, boundary_metrics = _select_multiframe_boundary_points(
+        near_points,
+        near_frame_numbers,
+        boundary_mode=boundary_mode,
+        min_frame_support=int(boundary_min_frame_support),
+    )
+    if boundary_points.shape[0] < 3:
+        report = _multiframe_fit_blocked_report(
+            run,
+            reasons=["insufficient_multiframe_boundary_points"],
+            masks=masks,
+            frames_requested=frame_indices,
+            used_frames=used_frames,
+            skipped_frames=skipped_frames,
+            metrics={**metrics_base, **boundary_metrics},
+        )
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        return TabletopMultiframeFitResult(
+            polygon_path, plane_path, fused_points_path, semantic_mask_path, refined_mask_path, report_path, report
+        )
+
+    polygon_xy = _tabletop_hull_xy(boundary_points[:, :2], method=hull)
+    if polygon_xy is None:
+        report = _multiframe_fit_blocked_report(
+            run,
+            reasons=["multiframe_depth_polygon_hull_failed"],
+            masks=masks,
+            frames_requested=frame_indices,
+            used_frames=used_frames,
+            skipped_frames=skipped_frames,
+            metrics={**metrics_base, **boundary_metrics},
+        )
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        return TabletopMultiframeFitResult(
+            polygon_path, plane_path, fused_points_path, semantic_mask_path, refined_mask_path, report_path, report
+        )
+
+    top_z = float(np.median(boundary_points[:, 2]))
+    residuals = np.abs(points_world @ normal + offset)
+    inlier_residuals = residuals[inliers]
+    extent = np.max(polygon_xy, axis=0) - np.min(polygon_xy, axis=0)
+    boundary_inliers = np.zeros_like(inliers, dtype=bool)
+    boundary_inliers[np.where(inliers)[0][boundary_keep]] = True
+    refined_mask = np.zeros(anchor_shape or (1, 1), dtype=np.uint8)
+    if anchor_frame_number is not None and anchor_shape is not None:
+        anchor_inliers = boundary_inliers & (frame_numbers == int(anchor_frame_number))
+        refined_mask[rows[anchor_inliers], cols[anchor_inliers]] = 255
+    plane_doc = {
+        "version": 1,
+        "status": "passed",
+        "source_backend": SEMANTIC_MULTI_TABLE_COLLISION_SOURCE,
+        "coordinate_world": "sim_world",
+        "coordinate_frame": "sim_world",
+        "unit": "meter",
+        "normal": [float(v) for v in normal.tolist()],
+        "offset_m": float(offset),
+        "equation": "normal dot X + offset = 0",
+        "top_z_m": top_z,
+        "source_frame_count": len(used_frames),
+        "used_frames": used_frames,
+        "metrics": {
+            **metrics_base,
+            "input_semantic_depth_point_count": int(points_world.shape[0]),
+            "plane_inlier_count": int(np.count_nonzero(inliers)),
+            "plane_inlier_ratio": float(np.count_nonzero(inliers) / max(1, points_world.shape[0])),
+            "plane_distance_threshold_m": float(plane_distance_threshold_m),
+            "plane_residual_median_m": float(np.median(inlier_residuals)),
+            "plane_residual_p90_m": float(np.percentile(inlier_residuals, 90.0)),
+            **boundary_metrics,
+        },
+    }
+    polygon = {
+        "version": 1,
+        "status": "passed",
+        "source_backend": SEMANTIC_MULTI_TABLE_COLLISION_SOURCE,
+        "semantic_source_backend": "tabletop_semantic_masks",
+        "geometry_type": f"{hull}_from_multiframe_semantic_masked_depth_plane",
+        "coordinate_world": "sim_world",
+        "coordinate_frame": "sim_world",
+        "unit": "meter",
+        "polygon_world_xy": [[float(x), float(y)] for x, y in polygon_xy.tolist()],
+        "polygons_world_xy": [[[float(x), float(y)] for x, y in polygon_xy.tolist()]],
+        "polygon_count": 1,
+        "top_z_m": top_z,
+        "support_height_m": top_z,
+        "semantic_mask_collection_path": _rel(run, _resolve_run_path(run, masks)),
+        "semantic_mask_path": "background/tabletop_semantic_mask.png",
+        "refined_plane_mask_path": "background/tabletop_mask.png",
+        "fused_points_path": "background/fused_tabletop_points.ply",
+        "table_plane_path": "background/table_plane_multiframe.json",
+        "depth_camera_to_pose_camera_bridge": camera_bridge_name,
+        "source_frame_count": len(used_frames),
+        "source_frames": used_frames,
+        "plane_world": {
+            "normal": [float(v) for v in normal.tolist()],
+            "offset_m": float(offset),
+            "equation": "normal dot X + offset = 0",
+        },
+        "polygon_extent_x_m": float(extent[0]),
+        "polygon_extent_y_m": float(extent[1]),
+        "input_semantic_depth_point_count": int(points_world.shape[0]),
+        "near_plane_point_count": int(np.count_nonzero(inliers)),
+        "boundary_mode": boundary_mode,
+        "boundary_min_frame_support": int(boundary_min_frame_support),
+        "boundary_point_count": int(boundary_points.shape[0]),
+    }
+    report = {
+        "version": 1,
+        "status": "passed",
+        "source_backend": SEMANTIC_MULTI_TABLE_COLLISION_SOURCE,
+        "frames_requested": frame_indices,
+        "hull_method": hull,
+        "semantic_mask_collection_path": _rel(run, _resolve_run_path(run, masks)),
+        "used_frames": used_frames,
+        "skipped_frames": skipped_frames,
+        "metrics": plane_doc["metrics"],
+        "artifacts": {
+            "polygon_path": "background/table_polygon_world.json",
+            "table_plane_path": "background/table_plane_multiframe.json",
+            "fused_points_path": "background/fused_tabletop_points.ply",
+            "anchor_semantic_mask_path": "background/tabletop_semantic_mask.png",
+            "anchor_refined_plane_mask_path": "background/tabletop_mask.png",
+        },
+        "claim_boundary": {
+            "semantic_tabletop_localization": "provided_by_per_frame_masks_not_inferred_from_3dgs",
+            "metric_geometry": "multiframe_phone_depth_confidence_and_explicit_camera_pose",
+            "not_collision_source": ["3dgs_splat_centers", "bbox_proxy", "full_scene_largest_plane"],
+        },
+        "blocking_reasons": [],
+    }
+    if write:
+        if anchor_mask is not None and anchor_mask_path is not None:
+            if anchor_mask_path.resolve() != semantic_mask_path.resolve():
+                shutil.copyfile(anchor_mask_path, semantic_mask_path)
+            else:
+                Image.fromarray(anchor_mask.astype(np.uint8)).save(semantic_mask_path)
+        Image.fromarray(refined_mask).save(refined_mask_path)
+        polygon_path.write_text(json.dumps(polygon, indent=2), encoding="utf-8")
+        plane_path.write_text(json.dumps(plane_doc, indent=2), encoding="utf-8")
+        _write_points_ply(fused_points_path, boundary_points)
+    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    return TabletopMultiframeFitResult(
+        polygon_path, plane_path, fused_points_path, semantic_mask_path, refined_mask_path, report_path, report
+    )
 
 
 def build_table_collision(
@@ -420,7 +823,7 @@ def qa_bg_table(
 
     table_contract = _table_polygon_contract(polygon)
     hard_reasons.extend(table_contract.pop("blocking_reasons"))
-    projection = _table_projection_metrics(run, polygon, camera)
+    projection = _table_projection_metrics(run, polygon, camera, trajectory)
     hard_reasons.extend(projection.pop("blocking_reasons"))
     depth_metrics = _depth_plane_metrics(run, polygon, camera, trajectory, frame_indices)
     hard_reasons.extend(depth_metrics.pop("blocking_reasons"))
@@ -726,7 +1129,12 @@ def _normalize_render_frames(run: Path, value: Any, frame_indices: list[int]) ->
     return frames
 
 
-def _table_projection_metrics(run: Path, polygon: dict[str, Any], camera: dict[str, Any]) -> dict[str, Any]:
+def _table_projection_metrics(
+    run: Path,
+    polygon: dict[str, Any],
+    camera: dict[str, Any],
+    trajectory: dict[str, Any],
+) -> dict[str, Any]:
     reasons: list[str] = []
     semantic_mask_path = run / "background" / "tabletop_semantic_mask.png"
     fallback_mask_path = run / "background" / "tabletop_mask.png"
@@ -743,7 +1151,11 @@ def _table_projection_metrics(run: Path, polygon: dict[str, Any], camera: dict[s
     k = _camera_matrix(camera)
     if k is None:
         reasons.append("camera_intrinsics_missing")
-    t_world_to_camera = _world_to_camera(camera, support_height_m=float(polygon.get("support_height_m", 0.0) or 0.0))
+    _bridge_name, camera_bridge = _depth_camera_to_pose_camera_bridge(run, camera, trajectory)
+    t_world_to_camera = _world_to_depth_camera(camera.get("T_camera_to_world"), camera_bridge=camera_bridge)
+    if t_world_to_camera is None:
+        t_pose_world_to_camera = _world_to_camera(camera, support_height_m=float(polygon.get("support_height_m", 0.0) or 0.0))
+        t_world_to_camera = None if t_pose_world_to_camera is None else np.linalg.inv(camera_bridge) @ t_pose_world_to_camera
     if t_world_to_camera is None:
         reasons.append("camera_extrinsics_missing")
     vertex_sets = _polygon_world_vertex_sets(polygon)
@@ -817,8 +1229,9 @@ def _depth_plane_metrics(
     polygons_xy = _polygon_xy_sets(polygon)
     if not polygons_xy:
         return {"blocking_reasons": ["table_polygon_vertices_missing"]}
+    _bridge_name, camera_bridge = _depth_camera_to_pose_camera_bridge(run, camera, trajectory)
     top_z = float(polygon.get("top_z_m", polygon.get("table_top_z_m", 0.0)) or 0.0)
-    mask_metrics = _depth_plane_metrics_from_tabletop_mask(run, camera, frames, k, top_z)
+    mask_metrics = _depth_plane_metrics_from_tabletop_mask(run, camera, frames, k, top_z, camera_bridge=camera_bridge)
     if mask_metrics is not None:
         return mask_metrics
     residuals: list[np.ndarray] = []
@@ -833,7 +1246,7 @@ def _depth_plane_metrics(
         depth = np.load(depth_path)
         if depth.ndim != 2:
             continue
-        points = _backproject_depth(depth, k, transform, stride=max(1, int(round(max(depth.shape) / 256))))
+        points = _backproject_depth(depth, k, transform, camera_bridge=camera_bridge, stride=max(1, int(round(max(depth.shape) / 256))))
         if points.size == 0:
             continue
         inside = _points_inside_any_polygon(points[:, :2], polygons_xy)
@@ -922,6 +1335,8 @@ def _depth_plane_metrics_from_tabletop_mask(
     frames: list[dict[str, Any]],
     k: np.ndarray,
     top_z: float,
+    *,
+    camera_bridge: np.ndarray,
 ) -> dict[str, Any] | None:
     mask_path = run / "background" / "tabletop_mask.png"
     if not mask_path.is_file():
@@ -947,7 +1362,8 @@ def _depth_plane_metrics_from_tabletop_mask(
         z = depth[rows, cols].astype(np.float64)
         x = (cols.astype(np.float64) - float(k[0, 2])) * z / float(k[0, 0])
         y = (rows.astype(np.float64) - float(k[1, 2])) * z / float(k[1, 1])
-        points_world = (t_camera_to_world @ np.column_stack([x, y, z, np.ones_like(z)]).T).T[:, :3]
+        points_camera = (camera_bridge @ np.column_stack([x, y, z, np.ones_like(z)]).T).T
+        points_world = (t_camera_to_world @ points_camera.T).T[:, :3]
         residual = np.abs(points_world[:, 2] - top_z)
         residual = residual[np.isfinite(residual)]
         if residual.size:
@@ -972,6 +1388,7 @@ def _write_bg_table_overlays(
     k = _camera_matrix(camera)
     if k is None:
         return []
+    _bridge_name, camera_bridge = _depth_camera_to_pose_camera_bridge(run, camera, trajectory)
     polygons = _polygon_world_vertex_sets(polygon)
     render_paths_by_frame = overlay_evidence.get("render_paths_by_frame") if isinstance(overlay_evidence.get("render_paths_by_frame"), dict) else {}
     out: list[Path] = []
@@ -992,7 +1409,7 @@ def _write_bg_table_overlays(
         if t_camera_to_world is None:
             continue
         try:
-            t_world_to_camera = np.linalg.inv(t_camera_to_world)
+            t_world_to_camera = np.linalg.inv(camera_bridge) @ np.linalg.inv(t_camera_to_world)
         except np.linalg.LinAlgError:
             continue
         k_for_image = _scale_intrinsics_to_image(k, camera, image.shape[:2])
@@ -1104,11 +1521,196 @@ def _semantic_fit_blocked_report(run: Path, reasons: list[str], mask_path: Path,
     }
 
 
+def _multiframe_fit_blocked_report(
+    run: Path,
+    *,
+    reasons: list[str],
+    masks: str | Path,
+    frames_requested: list[int],
+    used_frames: list[dict[str, Any]],
+    skipped_frames: list[dict[str, Any]],
+    metrics: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "version": 1,
+        "status": "blocked",
+        "source_backend": SEMANTIC_MULTI_TABLE_COLLISION_SOURCE,
+        "frames_requested": frames_requested,
+        "semantic_mask_collection_path": _rel(run, _resolve_run_path(run, masks)),
+        "used_frames": used_frames,
+        "skipped_frames": skipped_frames,
+        "metrics": {
+            "used_frame_count": len(used_frames),
+            "skipped_frame_count": len(skipped_frames),
+            **metrics,
+        },
+        "artifacts": {
+            "polygon_path": None,
+            "table_plane_path": None,
+            "fused_points_path": None,
+            "anchor_semantic_mask_path": None,
+            "anchor_refined_plane_mask_path": None,
+        },
+        "blocking_reasons": _dedupe(reasons),
+        "claim_boundary": {
+            "semantic_tabletop_localization": "blocked_without_multiframe_masks",
+            "metric_geometry": "blocked_without_phone_depth_confidence_and_pose",
+        },
+    }
+
+
+def _explicit_phone_camera_blocking_reasons(camera: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    if camera.get("intrinsics_source") != "arkit_explicit":
+        reasons.append("camera_intrinsics_source_not_arkit_explicit")
+    if camera.get("extrinsics_source") != "arkit_explicit":
+        reasons.append("camera_extrinsics_source_not_arkit_explicit")
+    if camera.get("scale_source") != "arkit_sceneDepth_meters":
+        reasons.append("scale_source_not_arkit_sceneDepth_meters")
+    if camera.get("depth_unit") != "meter":
+        reasons.append("depth_unit_not_meter")
+    return reasons
+
+
+def _resolve_multiframe_mask_path(run: Path, masks: str | Path, frame: dict[str, Any], frame_number: int) -> Path | None:
+    raw = str(masks)
+    frame_id = str(frame.get("frame_id") or f"frame_{frame_number:06d}")
+    if "{frame" in raw:
+        return _resolve_run_path(run, raw.format(frame=frame_number, frame_id=frame_id))
+    base = _resolve_run_path(run, masks)
+    if base.is_dir():
+        candidates = [
+            base / f"{frame_id}.png",
+            base / f"frame_{frame_number:06d}.png",
+            base / f"{frame_number:06d}.png",
+            base / f"{frame_number}.png",
+        ]
+        return next((path for path in candidates if path.is_file()), candidates[0])
+    if base.is_file() and frame_number == 0:
+        return base
+    return base
+
+
+def _limit_frame_points(
+    points: np.ndarray,
+    rows: np.ndarray,
+    cols: np.ndarray,
+    *,
+    max_points: int,
+    seed: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if max_points <= 0 or points.shape[0] <= max_points:
+        return points, rows, cols
+    rng = np.random.default_rng(seed)
+    keep = rng.choice(points.shape[0], size=int(max_points), replace=False)
+    keep.sort()
+    return points[keep], rows[keep], cols[keep]
+
+
+def _trajectory_baseline(camera_centers: list[np.ndarray]) -> float | None:
+    if len(camera_centers) < 2:
+        return None
+    centers = np.asarray(camera_centers, dtype=np.float64)
+    delta = centers[:, None, :] - centers[None, :, :]
+    return float(np.max(np.linalg.norm(delta, axis=2)))
+
+
+def _select_multiframe_boundary_points(
+    near_points: np.ndarray,
+    frame_numbers: np.ndarray,
+    *,
+    boundary_mode: str,
+    min_frame_support: int,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    if boundary_mode == "union-hull":
+        keep = np.ones(near_points.shape[0], dtype=bool)
+        return near_points, keep, {
+            "boundary_mode": boundary_mode,
+            "boundary_min_frame_support": 1,
+            "boundary_frame_hull_count": int(len(set(int(v) for v in frame_numbers.tolist()))),
+            "boundary_point_count": int(near_points.shape[0]),
+        }
+
+    frame_hulls: list[np.ndarray] = []
+    for frame_number in sorted(set(int(v) for v in frame_numbers.tolist())):
+        frame_points = near_points[frame_numbers == frame_number]
+        hull = _tabletop_hull_xy(frame_points[:, :2], method="convex-hull")
+        if hull is not None:
+            frame_hulls.append(hull)
+    if not frame_hulls:
+        keep = np.zeros(near_points.shape[0], dtype=bool)
+        return near_points[keep], keep, {
+            "boundary_mode": boundary_mode,
+            "boundary_min_frame_support": int(min_frame_support),
+            "boundary_frame_hull_count": 0,
+            "boundary_point_count": 0,
+        }
+
+    required = min(max(1, int(min_frame_support)), len(frame_hulls))
+    support = np.zeros(near_points.shape[0], dtype=np.int16)
+    for hull in frame_hulls:
+        support += _points_inside_any_polygon(near_points[:, :2], [hull]).astype(np.int16)
+    anchor_inside = _points_inside_any_polygon(near_points[:, :2], [frame_hulls[0]])
+    keep = anchor_inside & (support >= required)
+    return near_points[keep], keep, {
+        "boundary_mode": boundary_mode,
+        "boundary_min_frame_support": required,
+        "boundary_frame_hull_count": int(len(frame_hulls)),
+        "boundary_anchor_required": True,
+        "boundary_point_count": int(np.count_nonzero(keep)),
+        "boundary_support_min": int(support[keep].min()) if np.any(keep) else None,
+        "boundary_support_p50": float(np.percentile(support[keep], 50.0)) if np.any(keep) else None,
+    }
+
+
+def _write_points_ply(path: Path, points: np.ndarray) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows = [f"{float(x):.9g} {float(y):.9g} {float(z):.9g}" for x, y, z in points]
+    header = [
+        "ply",
+        "format ascii 1.0",
+        f"element vertex {len(rows)}",
+        "property float x",
+        "property float y",
+        "property float z",
+        "end_header",
+    ]
+    path.write_text("\n".join(header + rows) + "\n", encoding="utf-8")
+
+
+def _depth_camera_to_pose_camera_bridge(
+    run: Path,
+    camera: dict[str, Any],
+    trajectory: dict[str, Any],
+) -> tuple[str | None, np.ndarray]:
+    metadata = _load_json(run / "capture_contract.json").get("metadata", {})
+    bridge_name = (
+        camera.get("depth_camera_to_pose_camera_bridge")
+        or trajectory.get("depth_camera_to_pose_camera_bridge")
+        or metadata.get("depth_camera_to_pose_camera_bridge")
+    )
+    if bridge_name == "opencv_to_arkit_camera" or metadata.get("source_format") == "record3d_exr_jpg_sequence":
+        return "opencv_to_arkit_camera", OPENCV_TO_ARKIT_CAMERA_BRIDGE.copy()
+    return None, np.eye(4, dtype=np.float64)
+
+
+def _world_to_depth_camera(value: Any, *, camera_bridge: np.ndarray) -> np.ndarray | None:
+    t_camera_to_world = _transform(value)
+    if t_camera_to_world is None:
+        return None
+    try:
+        return np.linalg.inv(camera_bridge) @ np.linalg.inv(t_camera_to_world)
+    except np.linalg.LinAlgError:
+        return None
+
+
 def _backproject_selected_depth(
     depth: np.ndarray,
     selected: np.ndarray,
     k: np.ndarray,
     t_camera_to_world: np.ndarray,
+    *,
+    camera_bridge: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     rows, cols = np.where(selected)
     if rows.size == 0:
@@ -1116,7 +1718,7 @@ def _backproject_selected_depth(
     z = depth[rows, cols].astype(np.float64)
     x = (cols.astype(np.float64) - float(k[0, 2])) * z / float(k[0, 0])
     y = (rows.astype(np.float64) - float(k[1, 2])) * z / float(k[1, 1])
-    points_camera = np.column_stack([x, y, z, np.ones_like(z)])
+    points_camera = (camera_bridge @ np.column_stack([x, y, z, np.ones_like(z)]).T).T
     points_world = (t_camera_to_world @ points_camera.T).T[:, :3]
     finite = np.all(np.isfinite(points_world), axis=1)
     return points_world[finite], rows[finite], cols[finite]
@@ -1258,7 +1860,14 @@ def Xform "World"
 '''
 
 
-def _backproject_depth(depth: np.ndarray, k: np.ndarray, t_camera_to_world: np.ndarray, *, stride: int) -> np.ndarray:
+def _backproject_depth(
+    depth: np.ndarray,
+    k: np.ndarray,
+    t_camera_to_world: np.ndarray,
+    *,
+    camera_bridge: np.ndarray,
+    stride: int,
+) -> np.ndarray:
     valid = np.isfinite(depth) & (depth > 0.0)
     rows, cols = np.where(valid)
     if rows.size == 0:
@@ -1270,7 +1879,7 @@ def _backproject_depth(depth: np.ndarray, k: np.ndarray, t_camera_to_world: np.n
     z = depth[rows, cols].astype(np.float64)
     x = (cols.astype(np.float64) - float(k[0, 2])) * z / float(k[0, 0])
     y = (rows.astype(np.float64) - float(k[1, 2])) * z / float(k[1, 1])
-    points_camera = np.column_stack([x, y, z, np.ones_like(z)])
+    points_camera = (camera_bridge @ np.column_stack([x, y, z, np.ones_like(z)]).T).T
     points_world = (t_camera_to_world @ points_camera.T).T[:, :3]
     return points_world[np.all(np.isfinite(points_world), axis=1)]
 

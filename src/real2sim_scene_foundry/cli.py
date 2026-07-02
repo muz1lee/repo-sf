@@ -11,6 +11,7 @@ from PIL import Image
 from .background import HTTPInpaintClient
 from .camera import CameraIntrinsics
 from .bg_table import build_table_collision as build_bg_table_collision
+from .bg_table import fit_tabletop_multiframe_from_semantic_masks
 from .bg_table import fit_tabletop_from_semantic_mask
 from .bg_table import qa_bg_table
 from .bg_table import segment_tabletop_semantic_mask
@@ -375,6 +376,34 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"wrote {artifact_path}")
         print(f"status={result.report.get('status')}")
         return 0
+    if args.command == "fit-tabletop-multiframe":
+        result = fit_tabletop_multiframe_from_semantic_masks(
+            args.run_dir,
+            masks=args.masks,
+            frames=args.frames,
+            hull=args.hull,
+            plane_distance_threshold_m=args.plane_distance_threshold_m,
+            confidence_coverage_threshold=args.confidence_coverage_threshold,
+            min_frame_count=args.min_frame_count,
+            min_baseline_m=args.min_baseline_m,
+            max_points_per_frame=args.max_points_per_frame,
+            boundary_mode=args.boundary_mode,
+            boundary_min_frame_support=args.boundary_min_frame_support,
+            write=args.write,
+        )
+        print(f"wrote {result.report_path}")
+        if args.write and result.report.get("status") == "passed":
+            for artifact_path in (
+                result.semantic_mask_path,
+                result.refined_mask_path,
+                result.plane_path,
+                result.fused_points_path,
+                result.polygon_path,
+            ):
+                if artifact_path.is_file():
+                    print(f"wrote {artifact_path}")
+        print(f"status={result.report.get('status')}")
+        return 0
     if args.command == "build-table-collision":
         result = build_bg_table_collision(args.run_dir, source=args.source, write=args.write, thickness_m=args.height)
         print(f"wrote {result.mesh_path}")
@@ -437,6 +466,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_qa_background_registration_parser(subparsers)
     _add_segment_tabletop_mask_parser(subparsers)
     _add_fit_tabletop_from_mask_parser(subparsers)
+    _add_fit_tabletop_multiframe_parser(subparsers)
     _add_build_table_collision_parser(subparsers)
     _add_qa_bg_table_parser(subparsers)
     for name in ("export", "render"):
@@ -698,6 +728,22 @@ def _add_fit_tabletop_from_mask_parser(subparsers: argparse._SubParsersAction) -
     parser.add_argument("--frame-index", type=int, default=0)
     parser.add_argument("--hull", choices=("convex-hull", "clipped-convex-hull", "rotated-rectangle"), default="convex-hull")
     parser.add_argument("--plane-distance-threshold-m", type=float, default=0.02)
+    parser.add_argument("--write", action="store_true")
+
+
+def _add_fit_tabletop_multiframe_parser(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser("fit-tabletop-multiframe")
+    parser.add_argument("--run-dir", required=True, type=Path)
+    parser.add_argument("--masks", default="background/tabletop_semantic_masks")
+    parser.add_argument("--frames", default="0,20,40,60")
+    parser.add_argument("--hull", choices=("convex-hull", "clipped-convex-hull", "rotated-rectangle"), default="convex-hull")
+    parser.add_argument("--plane-distance-threshold-m", type=float, default=0.02)
+    parser.add_argument("--confidence-coverage-threshold", type=float, default=0.30)
+    parser.add_argument("--min-frame-count", type=int, default=2)
+    parser.add_argument("--min-baseline-m", type=float, default=0.02)
+    parser.add_argument("--max-points-per-frame", type=int, default=50000)
+    parser.add_argument("--boundary-mode", choices=("consensus-hull", "union-hull"), default="consensus-hull")
+    parser.add_argument("--boundary-min-frame-support", type=int, default=2)
     parser.add_argument("--write", action="store_true")
 
 
