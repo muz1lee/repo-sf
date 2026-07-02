@@ -276,6 +276,29 @@ def test_qa_bg_table_applies_nerfstudio_gaussian_asset_axis_bridge_for_center_di
     assert diagnostic["transform_source"] == "diagnostic_splat_asset_to_sim_world"
 
 
+def test_qa_bg_table_selects_identity_asset_bridge_when_it_aligns_better_than_nerfstudio_bridge(tmp_path):
+    run = tmp_path / "run"
+    _write_bg_table_run(run)
+    _write_ascii_gaussian_splat(
+        run / "background" / "3dgs_native" / "splat_rgb.ply",
+        [(-0.1, -0.1, 1.0), (0.0, 0.0, 1.0), (0.1, 0.1, 1.0), (0.5, 0.5, -1.2)],
+    )
+    main(["build-table-collision", "--run-dir", str(run), "--source", "background/table_polygon_world.json", "--write"])
+
+    code = main(["qa-bg-table", "--run-dir", str(run), "--frames", "0", "--write-overlays"])
+
+    assert code == 0
+    report = json.loads((run / "qa" / "bg_table_report.json").read_text(encoding="utf-8"))
+    diagnostic = report["splat_center_diagnostic"]
+    assert diagnostic["status"] == "computed"
+    assert diagnostic["alignment_status"] == "aligned"
+    assert diagnostic["asset_axis_bridge"]["status"] == "not_required_for_registered_splat_diagnostic"
+    assert diagnostic["asset_axis_bridge"]["selected_by"] == "table_alignment_score"
+    assert diagnostic["near_plane_inside_polygon_count"] == 3
+    assert diagnostic["near_plane_inside_polygon_ratio"] == pytest.approx(1.0)
+    assert diagnostic["transform_source"] == "registration_T_3dgs_world_to_sim_world"
+
+
 def test_qa_bg_table_is_partial_when_splat_centers_do_not_overlap_table_polygon(tmp_path):
     run = tmp_path / "run"
     _write_bg_table_run(run)

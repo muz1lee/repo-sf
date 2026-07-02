@@ -1447,22 +1447,25 @@ def _scale_intrinsics_to_image(k: np.ndarray, camera: dict[str, Any], image_shap
 
 def _splat_center_diagnostic(run: Path, polygon: dict[str, Any], t_3dgs_world_to_sim: np.ndarray | None) -> dict[str, Any]:
     centers, _colors, metadata = _load_splat_centers(run / "background" / "3dgs_native" / "splat_rgb.ply", max_points=100000)
-    asset_bridge = _splat_asset_axis_bridge(metadata)
-    bridge_report = _splat_axis_bridge_report(asset_bridge)
+    candidate_bridges = _splat_asset_axis_bridge_candidates(metadata)
     if centers.size == 0 or t_3dgs_world_to_sim is None:
         return {
             "status": "unavailable",
             "alignment_status": "unavailable",
             "near_plane_inside_polygon_ratio": None,
             "min_near_plane_inside_polygon_ratio": MIN_SPLAT_CENTER_TABLE_INSIDE_RATIO,
-            "asset_axis_bridge": bridge_report,
+            "asset_axis_bridge": _splat_axis_bridge_report(candidate_bridges[0][1], candidate_bridges[0][0], []),
             "collision_geometry_source": "not_used",
         }
-    diagnostic_transform = t_3dgs_world_to_sim @ asset_bridge
-    centers_sim = _transform_points(centers, diagnostic_transform)
-    top_z = float(polygon.get("top_z_m", polygon.get("table_top_z_m", 0.0)) or 0.0)
-    near = np.abs(centers_sim[:, 2] - top_z) <= 0.05
-    near_count = int(np.count_nonzero(near))
+    scored = [
+        _score_splat_axis_bridge(name, bridge, centers, polygon, t_3dgs_world_to_sim)
+        for name, bridge in candidate_bridges
+    ]
+    selected = max(scored, key=lambda item: (item["near_plane_inside_polygon_ratio"] or 0.0, item["near_plane_inside_polygon_count"], item["near_plane_count"]))
+    asset_bridge = selected["bridge"]
+    bridge_report = _splat_axis_bridge_report(asset_bridge, selected["bridge_name"], scored)
+    diagnostic_transform = selected["transform"]
+    near_count = int(selected["near_plane_count"])
     if near_count == 0:
         return {
             "status": "no_near_plane_splats",
@@ -1475,9 +1478,8 @@ def _splat_center_diagnostic(run: Path, polygon: dict[str, Any], t_3dgs_world_to
             "transform_source": _splat_diagnostic_transform_source(asset_bridge),
             "collision_geometry_source": "not_used",
         }
-    inside = _points_inside_any_polygon(centers_sim[near, :2], _polygon_xy_sets(polygon))
-    inside_count = int(np.count_nonzero(inside))
-    inside_ratio = float(inside_count / near_count)
+    inside_count = int(selected["near_plane_inside_polygon_count"])
+    inside_ratio = float(selected["near_plane_inside_polygon_ratio"] or 0.0)
     alignment_status = "aligned" if inside_ratio >= MIN_SPLAT_CENTER_TABLE_INSIDE_RATIO else "misregistered"
     return {
         "status": "computed",
@@ -1496,16 +1498,63 @@ def _splat_center_diagnostic(run: Path, polygon: dict[str, Any], t_3dgs_world_to
     }
 
 
-def _splat_asset_axis_bridge(metadata: dict[str, Any]) -> np.ndarray:
+def _splat_asset_axis_bridge_candidates(metadata: dict[str, Any]) -> list[tuple[str, np.ndarray]]:
+    identity = np.eye(4, dtype=np.float64)
     if metadata.get("schema") == "nerfstudio_gaussian_ply":
-        return NERFSTUDIO_GAUSSIAN_ASSET_AXIS_BRIDGE.copy()
-    return np.eye(4, dtype=np.float64)
+        return [
+            ("registration_identity", identity),
+            ("nerfstudio_gaussian_axis_bridge", NERFSTUDIO_GAUSSIAN_ASSET_AXIS_BRIDGE.copy()),
+        ]
+    return [("registration_identity", identity)]
 
 
-def _splat_axis_bridge_report(transform: np.ndarray) -> dict[str, Any]:
-    applied = not np.allclose(transform, np.eye(4, dtype=np.float64))
+def _score_splat_axis_bridge(
+    name: str,
+    bridge: np.ndarray,
+    centers: np.ndarray,
+    polygon: dict[str, Any],
+    t_3dgs_world_to_sim: np.ndarray,
+) -> dict[str, Any]:
+    transform = t_3dgs_world_to_sim @ bridge
+    centers_sim = _transform_points(centers, transform)
+    top_z = float(polygon.get("top_z_m", polygon.get("table_top_z_m", 0.0)) or 0.0)
+    near = np.abs(centers_sim[:, 2] - top_z) <= 0.05
+    near_count = int(np.count_nonzero(near))
+    inside_count = 0
+    ratio = None
+    if near_count:
+        inside = _points_inside_any_polygon(centers_sim[near, :2], _polygon_xy_sets(polygon))
+        inside_count = int(np.count_nonzero(inside))
+        ratio = float(inside_count / near_count)
     return {
-        "status": "applied_for_nerfstudio_gaussian_ply_diagnostic" if applied else "not_required_for_plain_ply_diagnostic",
+        "bridge_name": name,
+        "bridge": bridge,
+        "transform": transform,
+        "near_plane_count": near_count,
+        "near_plane_inside_polygon_count": inside_count,
+        "near_plane_inside_polygon_ratio": ratio,
+    }
+
+
+def _splat_axis_bridge_report(transform: np.ndarray, selected_name: str, scored: list[dict[str, Any]]) -> dict[str, Any]:
+    applied = not np.allclose(transform, np.eye(4, dtype=np.float64))
+    if selected_name == "registration_identity":
+        status = "not_required_for_registered_splat_diagnostic"
+    else:
+        status = "applied_for_nerfstudio_gaussian_ply_diagnostic" if applied else "not_required_for_plain_ply_diagnostic"
+    return {
+        "status": status,
+        "selected_candidate": selected_name,
+        "selected_by": "table_alignment_score" if len(scored) > 1 else "single_candidate",
+        "candidate_scores": [
+            {
+                "candidate": item["bridge_name"],
+                "near_plane_count": item["near_plane_count"],
+                "near_plane_inside_polygon_count": item["near_plane_inside_polygon_count"],
+                "near_plane_inside_polygon_ratio": item["near_plane_inside_polygon_ratio"],
+            }
+            for item in scored
+        ],
         "matrix": transform.tolist(),
         "diagnostic_only": True,
         "not_written_to_registration_json": True,
