@@ -1,4 +1,4 @@
-"""Minimal simulator smoke export for BG-table collision validation."""
+"""Simulator export helpers for phone BG-table physics MVP validation."""
 
 from __future__ import annotations
 
@@ -11,6 +11,16 @@ from typing import Any
 
 import numpy as np
 import trimesh
+
+
+@dataclass(frozen=True)
+class BgTablePhysicsMvpResult:
+    config_path: Path
+    genesis_script_path: Path
+    usd_path: Path
+    cube_visual_path: Path
+    report_path: Path
+    report: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -33,6 +43,114 @@ class PhoneBgTableMvpResult:
     table_collision_report_path: Path
     report_path: Path
     report: dict[str, Any]
+
+
+def export_bg_table_physics_mvp(
+    run_dir: str | Path,
+    *,
+    cube_size_m: float = 0.08,
+    drop_height_m: float = 0.12,
+    settle_steps: int = 120,
+) -> BgTablePhysicsMvpResult:
+    run = Path(run_dir)
+    exports = run / "exports"
+    qa = run / "qa"
+    assets = exports / "bg_table_mvp_assets"
+    exports.mkdir(parents=True, exist_ok=True)
+    qa.mkdir(parents=True, exist_ok=True)
+    assets.mkdir(parents=True, exist_ok=True)
+
+    polygon = _load_json(run / "background" / "table_polygon_world.json")
+    table_report = _load_json(run / "table" / "collision_polygon_slab_report.json")
+    bg_report = _load_json(run / "qa" / "bg_table_report.json")
+    registration = _load_json(run / "background" / "registration.json")
+
+    table_mesh_rel = "table/collision_polygon_slab.glb"
+    table_mesh_path = run / table_mesh_rel
+    if not table_mesh_path.is_file():
+        raise FileNotFoundError(f"missing table collision mesh: {table_mesh_path}")
+
+    polygon_xy = _polygon_xy(polygon)
+    center_xy = _polygon_center_xy(polygon_xy)
+    top_z = float(polygon.get("top_z_m", polygon.get("table_top_z_m", table_report.get("top_z_m", 0.0))) or 0.0)
+    cube_size = float(cube_size_m)
+    drop_height = float(drop_height_m)
+    initial_center = [center_xy[0], center_xy[1], top_z + cube_size * 0.5 + drop_height]
+    expected_resting_center_z = top_z + cube_size * 0.5
+
+    cube_visual_path = assets / "test_cube.glb"
+    trimesh.creation.box(extents=(cube_size, cube_size, cube_size)).export(cube_visual_path)
+    background_visual = _background_visual_contract(run, bg_report, registration)
+    background_visual["provenance"] = "3DGS is not loaded as Genesis physics or native simulator background in this MVP scene."
+
+    config = {
+        "version": 1,
+        "scope": "bg_table_physics_mvp",
+        "support_surface": {
+            "mesh_path": table_mesh_rel,
+            "usd_path": "table/collision_polygon_slab.usd" if (run / "table" / "collision_polygon_slab.usd").is_file() else None,
+            "source_backend": polygon.get("source_backend") or table_report.get("source_backend"),
+            "geometry_type": table_report.get("geometry_type", "polygon_slab"),
+            "top_z_m": top_z,
+            "polygon_world_xy": polygon_xy,
+            "table_collision_final": True,
+        },
+        "test_object": {
+            "object_id": "table_mvp_cube",
+            "shape": "cube",
+            "size_m": cube_size,
+            "mass_kg": 0.1,
+            "friction": 0.8,
+            "initial_center_world_m": initial_center,
+            "expected_resting_center_z_m": expected_resting_center_z,
+            "visual_asset_path": _rel(run, cube_visual_path),
+        },
+        "physics_contract": {
+            "settle_steps": int(settle_steps),
+            "expected_contact_gap_abs_m_max": 0.03,
+            "max_horizontal_drift_m": 0.05,
+            "fall_below_table_margin_m": 0.10,
+        },
+        "background_visual": background_visual,
+    }
+
+    config_path = exports / "bg_table_mvp_config.json"
+    config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
+    genesis_script_path = exports / "bg_table_mvp_genesis.py"
+    genesis_script_path.write_text(_genesis_mvp_script(), encoding="utf-8")
+    usd_path = exports / "bg_table_mvp.usda"
+    usd_path.write_text(_mvp_usda(run, usd_path.parent, config), encoding="utf-8")
+
+    report = {
+        "version": 1,
+        "status": "script_written",
+        "scope": "bg_table_physics_mvp",
+        "config_path": "exports/bg_table_mvp_config.json",
+        "genesis_script_path": "exports/bg_table_mvp_genesis.py",
+        "usd_path": "exports/bg_table_mvp.usda",
+        "cube_visual_path": _rel(run, cube_visual_path),
+        "run_command": (
+            "/mnt/workspace/wenqian/knowin-world/.venv/bin/python "
+            "exports/bg_table_mvp_genesis.py --run-dir <run_dir> "
+            f"--settle-steps {int(settle_steps)} --backend cpu --no-viewer"
+        ),
+        "support_surface": config["support_surface"],
+        "test_object": config["test_object"],
+        "physics_contract": config["physics_contract"],
+        "background_visual": config["background_visual"],
+        "runtime_report_path": "qa/table_physics_mvp_runtime_report.json",
+        "claim": "table collision exported for physics MVP; 3DGS is visual-only provenance, not simulator-native physics",
+    }
+    report_path = qa / "table_physics_mvp_report.json"
+    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    return BgTablePhysicsMvpResult(
+        config_path=config_path,
+        genesis_script_path=genesis_script_path,
+        usd_path=usd_path,
+        cube_visual_path=cube_visual_path,
+        report_path=report_path,
+        report=report,
+    )
 
 
 def export_bg_table_physics_smoke(
@@ -147,7 +265,7 @@ def export_phone_bg_table_mvp(
     drop_height_m: float = 0.12,
     settle_steps: int = 120,
 ) -> PhoneBgTableMvpResult:
-    """Promote a phone 3DGS + table-collision smoke run into formal MVP export artifacts."""
+    """Promote a phone 3DGS + table-collision run into formal MVP export artifacts."""
 
     run = Path(run_dir)
     exports = run / "exports"
@@ -155,22 +273,23 @@ def export_phone_bg_table_mvp(
     exports.mkdir(parents=True, exist_ok=True)
     qa.mkdir(parents=True, exist_ok=True)
 
-    smoke_config = exports / "bg_table_physics_smoke_config.json"
-    smoke_usd = exports / "bg_table_physics_smoke.usda"
-    smoke_genesis = exports / "bg_table_physics_smoke_genesis.py"
-    smoke_report_path = qa / "table_physics_smoke_report.json"
-    if not smoke_config.is_file() or not smoke_usd.is_file() or not smoke_genesis.is_file() or not smoke_report_path.is_file():
-        export_bg_table_physics_smoke(
+    mvp_config = exports / "bg_table_mvp_config.json"
+    mvp_usd = exports / "bg_table_mvp.usda"
+    mvp_genesis = exports / "bg_table_mvp_genesis.py"
+    mvp_report_path = qa / "table_physics_mvp_report.json"
+    if not mvp_config.is_file() or not mvp_usd.is_file() or not mvp_genesis.is_file() or not mvp_report_path.is_file():
+        export_bg_table_physics_mvp(
             run,
             cube_size_m=cube_size_m,
             drop_height_m=drop_height_m,
             settle_steps=settle_steps,
         )
 
+    _ensure_formal_runtime_report(run)
     usd_path = exports / "scene.usda"
     genesis_script_path = exports / "genesis_scene.py"
-    shutil.copyfile(smoke_usd, usd_path)
-    shutil.copyfile(smoke_genesis, genesis_script_path)
+    shutil.copyfile(mvp_usd, usd_path)
+    shutil.copyfile(mvp_genesis, genesis_script_path)
 
     table_collision_report_path = _write_phone_table_collision_report(run)
     scene_manifest_path = _write_phone_scene_manifest(run)
@@ -191,9 +310,9 @@ def export_phone_bg_table_mvp(
         "genesis_scene": "exports/genesis_scene.py",
         "table_collision_report": _rel(run, table_collision_report_path),
         "genesis_settle_report": _rel(run, settle_report_path),
-        "smoke_report": "qa/table_physics_smoke_report.json",
-        "smoke_runtime_report": "qa/table_physics_smoke_runtime_report.json"
-        if (run / "qa" / "table_physics_smoke_runtime_report.json").is_file()
+        "physics_mvp_report": "qa/table_physics_mvp_report.json",
+        "physics_mvp_runtime_report": "qa/table_physics_mvp_runtime_report.json"
+        if (run / "qa" / "table_physics_mvp_runtime_report.json").is_file()
         else None,
         "engineering_interactive_scene_status": "ready_for_qa" if sim_manifest.get("support_surface", {}).get("status") == "ready" else "blocked",
         "simfoundry_upper_reproduction_status": "partial",
@@ -274,8 +393,8 @@ def _write_phone_scene_manifest(run: Path) -> Path:
         "exports": {
             "usd_scene": "exports/scene.usda",
             "genesis_scene": "exports/genesis_scene.py",
-            "smoke_usd_scene": "exports/bg_table_physics_smoke.usda",
-            "smoke_genesis_scene": "exports/bg_table_physics_smoke_genesis.py",
+            "mvp_usd_scene": "exports/bg_table_mvp.usda",
+            "mvp_genesis_scene": "exports/bg_table_mvp_genesis.py",
         },
     }
     path = run / "scene_manifest.phone.json"
@@ -330,8 +449,21 @@ def _write_phone_table_collision_report(run: Path) -> Path:
     return path
 
 
+def _ensure_formal_runtime_report(run: Path) -> None:
+    formal = run / "qa" / "table_physics_mvp_runtime_report.json"
+    legacy = run / "qa" / "table_physics_smoke_runtime_report.json"
+    if formal.is_file() or not legacy.is_file():
+        return
+    data = _load_json(legacy)
+    if data:
+        if isinstance(data.get("test_object"), dict) and data["test_object"].get("object_id") == "table_smoke_cube":
+            data["test_object"]["object_id"] = "table_mvp_cube"
+        data["source_report_migrated_from"] = "legacy_runtime_report"
+        formal.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
 def _write_phone_genesis_settle_report(run: Path) -> Path:
-    runtime = _load_json(run / "qa" / "table_physics_smoke_runtime_report.json")
+    runtime = _load_json(run / "qa" / "table_physics_mvp_runtime_report.json")
     obj = runtime.get("test_object", {}) if isinstance(runtime.get("test_object"), dict) else {}
     checks = runtime.get("checks", {}) if isinstance(runtime.get("checks"), dict) else {}
     contact_gap = _finite_float(obj.get("contact_gap_m"), 0.0)
@@ -343,7 +475,7 @@ def _write_phone_genesis_settle_report(run: Path) -> Path:
         "status": status,
         "stability_status": stability_status,
         "scope": "phone_bg_table_physics_mvp",
-        "source_report": "qa/table_physics_smoke_runtime_report.json" if runtime else None,
+        "source_report": "qa/table_physics_mvp_runtime_report.json" if runtime else None,
         "settle_steps": runtime.get("settle_steps"),
         "objects": [obj] if obj else [],
         "max_penetration_depth_m": max(0.0, -contact_gap),
@@ -382,7 +514,7 @@ def _write_phone_backend_reports(run: Path, usd_path: Path, genesis_script_path:
                 "status": "script_written",
                 "scope": "phone_bg_table_physics_mvp",
                 "script_path": _rel(run, genesis_script_path),
-                "loads_config": "exports/bg_table_physics_smoke_config.json",
+                "loads_config": "exports/bg_table_mvp_config.json",
                 "support_surface_status": "ready",
                 "background_visual_role": "browser_3dgs_sidecar_not_simulator_native",
             },
@@ -475,6 +607,20 @@ def _matrix4d_translate(xyz: list[float]) -> str:
         "(0, 1, 0, 0), "
         "(0, 0, 1, 0), "
         f"({x:.8g}, {y:.8g}, {z:.8g}, 1) )"
+    )
+
+
+def _mvp_usda(run: Path, export_dir: Path, config: dict[str, Any]) -> str:
+    return _smoke_usda(run, export_dir, config).replace("bg_table_physics_smoke", "bg_table_physics_mvp")
+
+
+def _genesis_mvp_script() -> str:
+    return (
+        _genesis_smoke_script()
+        .replace("bg_table_physics_smoke_config.json", "bg_table_mvp_config.json")
+        .replace("table_physics_smoke_runtime_report.json", "table_physics_mvp_runtime_report.json")
+        .replace("bg-table collision slab", "BG-table collision slab")
+        .replace("smoke", "MVP")
     )
 
 

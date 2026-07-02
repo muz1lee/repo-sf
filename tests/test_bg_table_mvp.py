@@ -6,7 +6,7 @@ import pytest
 import trimesh
 from PIL import Image
 
-from real2sim_scene_foundry.bg_table_sim import export_bg_table_physics_smoke, export_phone_bg_table_mvp
+from real2sim_scene_foundry.bg_table_sim import export_bg_table_physics_mvp, export_phone_bg_table_mvp
 from real2sim_scene_foundry.cli import main
 from real2sim_scene_foundry.export_qa import write_sim_export_report
 
@@ -342,18 +342,19 @@ def test_qa_bg_table_blocks_when_registered_transform_is_missing(tmp_path):
     assert report["claim"] is None
 
 
-def test_export_bg_table_physics_smoke_writes_genesis_usd_and_contact_contract(tmp_path):
+def test_export_bg_table_physics_mvp_writes_formal_genesis_usd_and_contact_contract(tmp_path):
     run = tmp_path / "run"
     _write_bg_table_run(run)
     main(["build-table-collision", "--run-dir", str(run), "--source", "background/table_polygon_world.json", "--write"])
     main(["qa-bg-table", "--run-dir", str(run), "--frames", "0", "--write-overlays"])
 
-    result = export_bg_table_physics_smoke(run, cube_size_m=0.08, drop_height_m=0.12, settle_steps=64)
+    result = export_bg_table_physics_mvp(run, cube_size_m=0.08, drop_height_m=0.12, settle_steps=64)
 
     assert result.report["status"] == "script_written"
-    assert result.report["scope"] == "bg_table_physics_smoke"
+    assert result.report["scope"] == "bg_table_physics_mvp"
     assert result.report["support_surface"]["mesh_path"] == "table/collision_polygon_slab.glb"
     assert result.report["support_surface"]["source_backend"] == "arkit_depth_ransac_plane"
+    assert result.report["test_object"]["object_id"] == "table_mvp_cube"
     assert result.report["test_object"]["shape"] == "cube"
     assert result.report["test_object"]["size_m"] == pytest.approx(0.08)
     assert result.report["test_object"]["expected_resting_center_z_m"] == pytest.approx(1.04)
@@ -361,39 +362,44 @@ def test_export_bg_table_physics_smoke_writes_genesis_usd_and_contact_contract(t
     assert result.report["background_visual"]["mode"] == "registered_3dgs_visual_only"
     assert result.report["background_visual"]["simulator_native_3dgs"] is False
     assert result.report["background_visual"]["physics_role"] == "none"
-    assert result.config_path == run / "exports" / "bg_table_physics_smoke_config.json"
-    assert result.genesis_script_path == run / "exports" / "bg_table_physics_smoke_genesis.py"
-    assert result.usd_path == run / "exports" / "bg_table_physics_smoke.usda"
-    assert result.cube_visual_path == run / "exports" / "bg_table_physics_smoke_assets" / "test_cube.glb"
-    assert result.report_path == run / "qa" / "table_physics_smoke_report.json"
+    assert result.config_path == run / "exports" / "bg_table_mvp_config.json"
+    assert result.genesis_script_path == run / "exports" / "bg_table_mvp_genesis.py"
+    assert result.usd_path == run / "exports" / "bg_table_mvp.usda"
+    assert result.cube_visual_path == run / "exports" / "bg_table_mvp_assets" / "test_cube.glb"
+    assert result.report_path == run / "qa" / "table_physics_mvp_report.json"
     assert result.config_path.is_file()
     assert result.genesis_script_path.is_file()
     assert result.usd_path.is_file()
     assert result.cube_visual_path.is_file()
+    assert "smoke" not in json.dumps(result.report).lower()
     script = result.genesis_script_path.read_text(encoding="utf-8")
     compile(script, str(result.genesis_script_path), "exec")
     assert "gs.morphs.Mesh" in script
     assert "gs.morphs.Box" in script
-    assert "table_physics_smoke_runtime_report.json" in script
+    assert "bg_table_mvp_config.json" in script
+    assert "table_physics_mvp_runtime_report.json" in script
+    assert "smoke" not in script.lower()
     usd = result.usd_path.read_text(encoding="utf-8")
     assert 'def Xform "SupportSurface"' in usd
     assert 'prepend references = @../table/collision_polygon_slab.glb@' in usd
     assert 'def Cube "TestCube"' in usd
     assert 'custom string rsf:background_visual_role = "visual_only_not_physics"' in usd
+    assert "smoke" not in usd.lower()
 
 
-def test_cli_export_bg_table_sim_smoke_writes_report(tmp_path):
+def test_cli_export_bg_table_mvp_writes_formal_report(tmp_path):
     run = tmp_path / "run"
     _write_bg_table_run(run)
     main(["build-table-collision", "--run-dir", str(run), "--source", "background/table_polygon_world.json", "--write"])
 
-    code = main(["export-bg-table-sim-smoke", "--run-dir", str(run), "--cube-size-m", "0.06", "--drop-height-m", "0.10"])
+    code = main(["export-bg-table-mvp", "--run-dir", str(run), "--cube-size-m", "0.06", "--drop-height-m", "0.10"])
 
     assert code == 0
-    report = json.loads((run / "qa" / "table_physics_smoke_report.json").read_text(encoding="utf-8"))
+    report = json.loads((run / "qa" / "table_physics_mvp_report.json").read_text(encoding="utf-8"))
     assert report["status"] == "script_written"
     assert report["test_object"]["size_m"] == pytest.approx(0.06)
     assert report["run_command"].endswith("--no-viewer")
+    assert "smoke" not in json.dumps(report).lower()
 
 
 def test_export_phone_bg_table_mvp_writes_formal_manifest_and_honest_claims(tmp_path):
@@ -406,7 +412,7 @@ def test_export_phone_bg_table_mvp_writes_formal_manifest_and_honest_claims(tmp_
     polygon_path.write_text(json.dumps(polygon), encoding="utf-8")
     main(["build-table-collision", "--run-dir", str(run), "--source", "background/table_polygon_world.json", "--write"])
     main(["qa-bg-table", "--run-dir", str(run), "--frames", "0", "--write-overlays"])
-    export_bg_table_physics_smoke(run, cube_size_m=0.08, drop_height_m=0.12, settle_steps=64)
+    export_bg_table_physics_mvp(run, cube_size_m=0.08, drop_height_m=0.12, settle_steps=64)
     Image.new("RGB", (100, 100), color=(20, 24, 28)).save(run / "qa" / "background_3dgs_render.png")
     (run / "qa" / "background_3dgs_render_report.json").write_text(
         json.dumps(
@@ -421,7 +427,7 @@ def test_export_phone_bg_table_mvp_writes_formal_manifest_and_honest_claims(tmp_
         ),
         encoding="utf-8",
     )
-    (run / "qa" / "table_physics_smoke_runtime_report.json").write_text(
+    (run / "qa" / "table_physics_mvp_runtime_report.json").write_text(
         json.dumps(
             {
                 "version": 1,
@@ -429,7 +435,7 @@ def test_export_phone_bg_table_mvp_writes_formal_manifest_and_honest_claims(tmp_
                 "stability_status": "passed",
                 "settle_steps": 64,
                 "test_object": {
-                    "object_id": "table_smoke_cube",
+                    "object_id": "table_mvp_cube",
                     "shape": "cube",
                     "size_m": 0.08,
                     "initial_center_world_m": [0.0, 0.0, 1.16],
@@ -459,10 +465,14 @@ def test_export_phone_bg_table_mvp_writes_formal_manifest_and_honest_claims(tmp_
     assert result.genesis_script_path == run / "exports" / "genesis_scene.py"
     assert result.settle_report_path == run / "qa" / "genesis_settle_report.json"
     assert result.report_path == run / "qa" / "phone_bg_table_mvp_report.json"
+    assert (run / "qa" / "table_physics_mvp_report.json").is_file()
+    assert (run / "qa" / "table_physics_mvp_runtime_report.json").is_file()
     scene = json.loads(result.scene_manifest_path.read_text(encoding="utf-8"))
     assert scene["scene_type"] == "phone_bg_table_physics_mvp"
     assert scene["objects"] == []
     assert scene["background"]["point_cloud_path"] == "background/3dgs_native/splat_rgb.ply"
+    assert "smoke" not in json.dumps(result.report).lower()
+    assert "smoke" not in json.dumps(scene).lower()
     manifest = json.loads(result.sim_export_manifest_path.read_text(encoding="utf-8"))
     assert manifest["source_scene_manifest"] == "scene_manifest.phone.json"
     assert manifest["objects"] == []
